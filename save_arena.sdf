@@ -1,0 +1,956 @@
+<?xml version="1.0" ?>
+<!--
+  NIOT SAVe (Student Autonomous underwater Vehicle) competition arena
+  Generated for Gazebo. SDF 1.7  (compatible with Gazebo-classic 11 and gz-sim).
+  Tank 25 x 20 m, water height 2.5 m. Course runs along +X.
+-->
+<sdf version="1.7">
+  <world name="save_arena">
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Adding any <plugin> here disables gz-sim's auto-loaded defaults,
+         so the standard trio (Physics, UserCommands, SceneBroadcaster)
+         must be listed explicitly, alongside Buoyancy for underwater sim. -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <!-- Buoyancy: applies Archimedes' principle to every link in the world
+         that has a collision shape + volume. Water density ~1000 kg/m^3.
+         (No per-model <enable> tag needed for this uniform-density mode.) -->
+    <plugin filename="gz-sim-buoyancy-system" name="gz::sim::systems::Buoyancy">
+      <uniform_fluid_density>1000</uniform_fluid_density>
+    </plugin>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.3 0.55 0.75 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.3 -0.9</direction>
+    </light>
+
+
+
+
+
+  <model name="pool">
+    <static>true</static>
+    <link name="floor">
+      <pose>0.0000 0.0000 -0.1000 0.0000 0.0000 0.0000</pose>
+      <collision name="floor_col">
+        <geometry><box><size>25.0 20.0 0.2</size></box></geometry>
+      </collision>
+      <visual name="floor_vis">
+        <geometry><box><size>25.0 20.0 0.2</size></box></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="wall_xp">
+      <pose>12.6000 0.0000 1.4000 0.0000 0.0000 0.0000</pose>
+      <collision name="wall_xp_col">
+        <geometry><box><size>0.2 20.4 2.8</size></box></geometry>
+      </collision>
+      <visual name="wall_xp_vis">
+        <geometry><box><size>0.2 20.4 2.8</size></box></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="wall_xn">
+      <pose>-12.6000 0.0000 1.4000 0.0000 0.0000 0.0000</pose>
+      <collision name="wall_xn_col">
+        <geometry><box><size>0.2 20.4 2.8</size></box></geometry>
+      </collision>
+      <visual name="wall_xn_vis">
+        <geometry><box><size>0.2 20.4 2.8</size></box></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="wall_yp">
+      <pose>0.0000 10.1000 1.4000 0.0000 0.0000 0.0000</pose>
+      <collision name="wall_yp_col">
+        <geometry><box><size>25.0 0.2 2.8</size></box></geometry>
+      </collision>
+      <visual name="wall_yp_vis">
+        <geometry><box><size>25.0 0.2 2.8</size></box></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="wall_yn">
+      <pose>0.0000 -10.1000 1.4000 0.0000 0.0000 0.0000</pose>
+      <collision name="wall_yn_col">
+        <geometry><box><size>25.0 0.2 2.8</size></box></geometry>
+      </collision>
+      <visual name="wall_yn_vis">
+        <geometry><box><size>25.0 0.2 2.8</size></box></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="water">
+    <static>true</static>
+    <link name="water_vol">
+      <pose>0.0000 0.0000 1.2500 0.0000 0.0000 0.0000</pose>
+      <visual name="water_vol_vis">
+        <geometry><box><size>25.0 20.0 2.5</size></box></geometry>
+        <material>
+          <ambient>0.2 0.45 0.75 0.3</ambient>
+          <diffuse>0.2 0.45 0.75 0.3</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="orange_path">
+    <static>true</static>
+    <link name="main_0">
+      <pose>-7.0000 0.0000 0.0300 0.0000 0.0000 0.0000</pose>
+      <visual name="main_0_vis">
+        <geometry><box><size>8.0 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="right_0">
+      <pose>-1.5000 1.5000 0.0300 0.0000 0.0000 0.7854</pose>
+      <visual name="right_0_vis">
+        <geometry><box><size>4.242640687119285 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="right_1">
+      <pose>1.5000 3.5000 0.0300 0.0000 0.0000 0.3218</pose>
+      <visual name="right_1_vis">
+        <geometry><box><size>3.1622776601683795 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="right_2">
+      <pose>5.5000 4.5000 0.0300 0.0000 0.0000 0.1974</pose>
+      <visual name="right_2_vis">
+        <geometry><box><size>5.0990195135927845 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="left_0">
+      <pose>-1.5000 -1.5000 0.0300 0.0000 0.0000 -0.7854</pose>
+      <visual name="left_0_vis">
+        <geometry><box><size>4.242640687119285 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="left_1">
+      <pose>1.5000 -3.5000 0.0300 0.0000 0.0000 -0.3218</pose>
+      <visual name="left_1_vis">
+        <geometry><box><size>3.1622776601683795 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="left_2">
+      <pose>5.5000 -4.5000 0.0300 0.0000 0.0000 -0.1974</pose>
+      <visual name="left_2_vis">
+        <geometry><box><size>5.0990195135927845 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="connect_0">
+      <pose>3.0000 0.0000 0.0300 0.0000 0.0000 -1.5708</pose>
+      <visual name="connect_0_vis">
+        <geometry><box><size>8.0 0.15 0.02</size></box></geometry>
+        <material>
+          <ambient>1.0 0.45 0.0 1.0</ambient>
+          <diffuse>1.0 0.45 0.0 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="start_buoy">
+    <static>true</static>
+    <link name="start_base">
+      <pose>-11.0000 0.0000 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="start_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="start_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="start_pipe">
+      <pose>-11.0000 0.0000 0.3000 0.0000 0.0000 0.0000</pose>
+      <collision name="start_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>0.6</length></cylinder></geometry>
+      </collision>
+      <visual name="start_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>0.6</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="start_ball">
+      <pose>-11.0000 0.0000 0.7000 0.0000 0.0000 0.0000</pose>
+      <visual name="start_ball_vis">
+        <geometry><sphere><radius>0.2</radius></sphere></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="flowers">
+    <static>true</static>
+    <link name="flower_r_base">
+      <pose>-7.0000 0.0000 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="flower_r_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="flower_r_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_r_pipe">
+      <pose>-7.0000 0.0000 0.4500 0.0000 0.0000 0.0000</pose>
+      <collision name="flower_r_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>0.9</length></cylinder></geometry>
+      </collision>
+      <visual name="flower_r_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>0.9</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_red">
+      <pose>-7.0000 0.0000 1.0000 0.0000 0.0000 0.0000</pose>
+      <visual name="flower_red_vis">
+        <geometry><sphere><radius>0.1145</radius></sphere></geometry>
+        <material>
+          <ambient>0.85 0.1 0.1 1.0</ambient>
+          <diffuse>0.85 0.1 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_g_base">
+      <pose>-6.0000 -2.2500 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="flower_g_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="flower_g_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_g_pipe">
+      <pose>-6.0000 -2.2500 0.4500 0.0000 0.0000 0.0000</pose>
+      <collision name="flower_g_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>0.9</length></cylinder></geometry>
+      </collision>
+      <visual name="flower_g_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>0.9</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_green">
+      <pose>-6.0000 -2.2500 1.0000 0.0000 0.0000 0.0000</pose>
+      <visual name="flower_green_vis">
+        <geometry><sphere><radius>0.1145</radius></sphere></geometry>
+        <material>
+          <ambient>0.1 0.7 0.15 1.0</ambient>
+          <diffuse>0.1 0.7 0.15 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_y_base">
+      <pose>-6.0000 2.2500 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="flower_y_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="flower_y_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_y_pipe">
+      <pose>-6.0000 2.2500 0.4500 0.0000 0.0000 0.0000</pose>
+      <collision name="flower_y_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>0.9</length></cylinder></geometry>
+      </collision>
+      <visual name="flower_y_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>0.9</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="flower_yellow">
+      <pose>-6.0000 2.2500 1.0000 0.0000 0.0000 0.0000</pose>
+      <visual name="flower_yellow_vis">
+        <geometry><sphere><radius>0.1145</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="love_lane">
+    <static>true</static>
+    <link name="ll_a_base">
+      <pose>-4.6000 0.0000 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="ll_a_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="ll_a_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="ll_a_pipe">
+      <pose>-4.6000 0.0000 0.2500 0.0000 0.0000 0.0000</pose>
+      <collision name="ll_a_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>0.5</length></cylinder></geometry>
+      </collision>
+      <visual name="ll_a_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>0.5</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="ll_b_base">
+      <pose>-4.0000 1.0000 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="ll_b_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="ll_b_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="ll_b_pipe">
+      <pose>-4.0000 1.0000 0.2500 0.0000 0.0000 0.0000</pose>
+      <collision name="ll_b_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>0.5</length></cylinder></geometry>
+      </collision>
+      <visual name="ll_b_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>0.5</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="ll_long">
+      <pose>-4.0000 0.6000 0.5000 1.5708 0.0000 0.0000</pose>
+      <visual name="ll_long_vis">
+        <geometry><cylinder><radius>0.03</radius><length>1.8</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="ll_short">
+      <pose>-4.6000 0.0000 0.5000 0.0000 1.5708 0.0000</pose>
+      <visual name="ll_short_vis">
+        <geometry><cylinder><radius>0.03</radius><length>1.2</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="cupid">
+    <static>true</static>
+    <link name="cupid_p_base">
+      <pose>4.0000 4.0000 0.0200 0.0000 0.0000 0.0000</pose>
+      <collision name="cupid_p_base_col">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+      </collision>
+      <visual name="cupid_p_base_vis">
+        <geometry><cylinder><radius>0.1</radius><length>0.04</length></cylinder></geometry>
+        <material>
+          <ambient>0.28 0.28 0.3 1.0</ambient>
+          <diffuse>0.28 0.28 0.3 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="cupid_p_pipe">
+      <pose>4.0000 4.0000 0.5000 0.0000 0.0000 0.0000</pose>
+      <collision name="cupid_p_pipe_col">
+        <geometry><cylinder><radius>0.03</radius><length>1.0</length></cylinder></geometry>
+      </collision>
+      <visual name="cupid_p_pipe_vis">
+        <geometry><cylinder><radius>0.03</radius><length>1.0</length></cylinder></geometry>
+        <material>
+          <ambient>0.6 0.6 0.62 1.0</ambient>
+          <diffuse>0.6 0.6 0.62 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="cupid_red">
+      <pose>4.0000 3.8500 1.3000 0.0000 0.0000 1.5708</pose>
+      <visual name="cupid_red_vis">
+        <geometry><box><size>0.61 0.02 0.61</size></box></geometry>
+        <material>
+          <ambient>0.85 0.1 0.1 1.0</ambient>
+          <diffuse>0.85 0.1 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="cupid_green">
+      <pose>4.0000 4.1500 1.3000 0.0000 0.0000 1.5708</pose>
+      <visual name="cupid_green_vis">
+        <geometry><box><size>0.61 0.02 0.61</size></box></geometry>
+        <material>
+          <ambient>0.1 0.7 0.15 1.0</ambient>
+          <diffuse>0.1 0.7 0.15 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="bins">
+    <static>true</static>
+    <link name="bin_O_base">
+      <pose>3.6000 -4.0000 0.0100 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_O_base_col">
+        <geometry><box><size>0.64 0.64 0.02</size></box></geometry>
+      </collision>
+      <visual name="bin_O_base_vis">
+        <geometry><box><size>0.64 0.64 0.02</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_O_wN">
+      <pose>3.6000 -3.6900 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_O_wN_col">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_O_wN_vis">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_O_wS">
+      <pose>3.6000 -4.3100 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_O_wS_col">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_O_wS_vis">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_O_wE">
+      <pose>3.9100 -4.0000 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_O_wE_col">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_O_wE_vis">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_O_wW">
+      <pose>3.2900 -4.0000 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_O_wW_col">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_O_wW_vis">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_X_base">
+      <pose>4.6000 -4.0000 0.0100 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_X_base_col">
+        <geometry><box><size>0.64 0.64 0.02</size></box></geometry>
+      </collision>
+      <visual name="bin_X_base_vis">
+        <geometry><box><size>0.64 0.64 0.02</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_X_wN">
+      <pose>4.6000 -3.6900 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_X_wN_col">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_X_wN_vis">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_X_wS">
+      <pose>4.6000 -4.3100 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_X_wS_col">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_X_wS_vis">
+        <geometry><box><size>0.64 0.02 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_X_wE">
+      <pose>4.9100 -4.0000 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_X_wE_col">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_X_wE_vis">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="bin_X_wW">
+      <pose>4.2900 -4.0000 0.1500 0.0000 0.0000 0.0000</pose>
+      <collision name="bin_X_wW_col">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+      </collision>
+      <visual name="bin_X_wW_vis">
+        <geometry><box><size>0.02 0.6 0.3</size></box></geometry>
+        <material>
+          <ambient>0.12 0.18 0.45 1.0</ambient>
+          <diffuse>0.12 0.18 0.45 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="octagon_left">
+    <static>true</static>
+    <link name="octL_seg0">
+      <pose>10.3046 -2.6954 2.3000 0.0000 1.5708 2.3562</pose>
+      <visual name="octL_seg0_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg1">
+      <pose>8.0000 -1.7408 2.3000 0.0000 1.5708 3.1416</pose>
+      <visual name="octL_seg1_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg2">
+      <pose>5.6954 -2.6954 2.3000 0.0000 1.5708 -2.3562</pose>
+      <visual name="octL_seg2_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg3">
+      <pose>4.7408 -5.0000 2.3000 0.0000 1.5708 -1.5708</pose>
+      <visual name="octL_seg3_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg4">
+      <pose>5.6954 -7.3046 2.3000 0.0000 1.5708 -0.7854</pose>
+      <visual name="octL_seg4_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg5">
+      <pose>8.0000 -8.2592 2.3000 0.0000 1.5708 0.0000</pose>
+      <visual name="octL_seg5_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg6">
+      <pose>10.3046 -7.3046 2.3000 0.0000 1.5708 0.7854</pose>
+      <visual name="octL_seg6_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_seg7">
+      <pose>11.2592 -5.0000 2.3000 0.0000 1.5708 1.5708</pose>
+      <visual name="octL_seg7_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_float0">
+      <pose>11.2592 -3.6500 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octL_float0_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_float2">
+      <pose>6.6500 -1.7408 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octL_float2_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_float4">
+      <pose>4.7408 -6.3500 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octL_float4_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octL_float6">
+      <pose>9.3500 -8.2592 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octL_float6_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+  <model name="octagon_right">
+    <static>true</static>
+    <link name="octR_seg0">
+      <pose>10.3046 7.3046 2.3000 0.0000 1.5708 2.3562</pose>
+      <visual name="octR_seg0_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg1">
+      <pose>8.0000 8.2592 2.3000 0.0000 1.5708 3.1416</pose>
+      <visual name="octR_seg1_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg2">
+      <pose>5.6954 7.3046 2.3000 0.0000 1.5708 -2.3562</pose>
+      <visual name="octR_seg2_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg3">
+      <pose>4.7408 5.0000 2.3000 0.0000 1.5708 -1.5708</pose>
+      <visual name="octR_seg3_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg4">
+      <pose>5.6954 2.6954 2.3000 0.0000 1.5708 -0.7854</pose>
+      <visual name="octR_seg4_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg5">
+      <pose>8.0000 1.7408 2.3000 0.0000 1.5708 0.0000</pose>
+      <visual name="octR_seg5_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg6">
+      <pose>10.3046 2.6954 2.3000 0.0000 1.5708 0.7854</pose>
+      <visual name="octR_seg6_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_seg7">
+      <pose>11.2592 5.0000 2.3000 0.0000 1.5708 1.5708</pose>
+      <visual name="octR_seg7_vis">
+        <geometry><cylinder><radius>0.03</radius><length>2.7</length></cylinder></geometry>
+        <material>
+          <ambient>0.1 0.2 0.8 1.0</ambient>
+          <diffuse>0.1 0.2 0.8 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_float0">
+      <pose>11.2592 6.3500 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octR_float0_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_float2">
+      <pose>6.6500 8.2592 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octR_float2_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_float4">
+      <pose>4.7408 3.6500 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octR_float4_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+    <link name="octR_float6">
+      <pose>9.3500 1.7408 2.3000 0.0000 0.0000 0.0000</pose>
+      <visual name="octR_float6_vis">
+        <geometry><sphere><radius>0.12</radius></sphere></geometry>
+        <material>
+          <ambient>0.95 0.85 0.1 1.0</ambient>
+          <diffuse>0.95 0.85 0.1 1.0</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+
+    <!--
+      UNDERWATER VEHICLE
+      1. Download the my_lrauv model (see chat instructions) into a models/
+         folder next to this world file, e.g. ./models/my_lrauv/model.sdf
+      2. export GZ_SIM_RESOURCE_PATH=$(pwd)/models:$GZ_SIM_RESOURCE_PATH
+      3. Uncomment the include below.
+    -->
+    
+    <include>
+      <name>my_lrauv</name>
+      <uri>model://my_lrauv</uri>
+      <pose>-11 0 1.2 0 0 0</pose>
+    </include>
+   
+
+  </world>
+</sdf>

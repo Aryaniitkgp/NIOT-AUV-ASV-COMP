@@ -1,0 +1,39 @@
+# ros_gz_bridge config for the SAVe arena + my_lrauv vehicle.
+# Usage:
+#   ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:=save_bridge.yaml
+
+# Sim clock: Gazebo -> ROS only (note the one-way arrow convention below is
+# handled by ros_gz_bridge via the "direction" field, not by the character '[').
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# Propeller thrust command: ROS -> Gazebo
+- ros_topic_name: "/lrauv/cmd_thrust"
+  gz_topic_name: "/model/my_lrauv/joint/propeller_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+# Vertical fin (rudder) position command: ROS -> Gazebo
+- ros_topic_name: "/lrauv/cmd_rudder"
+  gz_topic_name: "/model/my_lrauv/joint/vertical_fins_joint/0/cmd_pos"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+# Horizontal fin (elevator) position command: ROS -> Gazebo
+- ros_topic_name: "/lrauv/cmd_elevator"
+  gz_topic_name: "/model/my_lrauv/joint/horizontal_fins_joint/0/cmd_pos"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+# Vehicle pose/odometry: Gazebo -> ROS (useful for RViz / navigation)
+- ros_topic_name: "/lrauv/pose"
+  gz_topic_name: "/model/my_lrauv/pose"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
