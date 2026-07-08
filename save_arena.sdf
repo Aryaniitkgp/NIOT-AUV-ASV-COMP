@@ -24,11 +24,21 @@
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
-    <!-- Buoyancy: applies Archimedes' principle to every link in the world
-         that has a collision shape + volume. Water density ~1000 kg/m^3.
-         (No per-model <enable> tag needed for this uniform-density mode.) -->
+    <!-- Buoyancy: GRADED mode so buoyant force only exists BELOW the water
+         surface. The water box spans z=0..2.5, so the surface is at z=2.5.
+         Above 2.5 the density is ~air (1 kg/m^3) => the vehicle regains its
+         weight and gravity pulls it back down, instead of the old uniform
+         mode which kept a neutrally-buoyant hull weightless even in the sky.
+         <enable> restricts the (more expensive) graded calc to the vehicle. -->
     <plugin filename="gz-sim-buoyancy-system" name="gz::sim::systems::Buoyancy">
-      <uniform_fluid_density>1000</uniform_fluid_density>
+      <graded_buoyancy>
+        <default_density>1000</default_density>   <!-- water, below the surface -->
+        <density_change>
+          <above_depth>2.5</above_depth>          <!-- z of the water surface -->
+          <density>1</density>                    <!-- air, above the surface -->
+        </density_change>
+      </graded_buoyancy>
+      <enable>my_lrauv</enable>
     </plugin>
 
     <scene>
