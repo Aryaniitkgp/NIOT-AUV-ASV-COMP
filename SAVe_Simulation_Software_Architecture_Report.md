@@ -95,6 +95,31 @@ Currently limited to manual control/inspection via CLI (`ros2 topic pub`, `ros2 
 | ROS → GZ | `/model/my_lrauv/joint/horizontal_fins_joint/0/cmd_pos` | `/lrauv/cmd_elevator` | `std_msgs/msg/Float64` | Pitch / depth control |
 | GZ → ROS | `/model/my_lrauv/pose` | `/lrauv/pose` | `tf2_msgs/msg/TFMessage` | Vehicle localization/telemetry |
 
+### 4.1 Verified Live Graph (this session)
+
+The following is the actual ROS 2 graph observed at runtime with `gz sim` + `parameter_bridge` active on an isolated `ROS_DOMAIN_ID=42`, inspected via `ros2 node list` / `ros2 topic list -t` and `rqt_graph`.
+
+**Nodes (1):**
+```
+/ros_gz_bridge
+```
+
+**Topics (7):**
+```
+/clock                [rosgraph_msgs/msg/Clock]
+/lrauv/cmd_thrust     [std_msgs/msg/Float64]
+/lrauv/cmd_rudder     [std_msgs/msg/Float64]
+/lrauv/cmd_elevator   [std_msgs/msg/Float64]
+/lrauv/pose           [tf2_msgs/msg/TFMessage]
+/parameter_events     [rcl_interfaces/msg/ParameterEvent]
+/rosout               [rcl_interfaces/msg/Log]
+```
+
+**Observations:**
+- `/ros_gz_bridge` is the only running node; `/parameter_events` and `/rosout` are standard ROS 2 infrastructure topics, not part of the vehicle interface.
+- The three `/lrauv/cmd_*` topics are bridged and ready but have **no active publisher** until a control node (e.g. `lrauv_teleop.py`) or a mission planner is started — they appear as inputs to the bridge with no upstream source.
+- **`/lrauv/pose` currently carries no data.** The bridge publishes the ROS side, but on the Gazebo side `/model/my_lrauv/pose` has **zero publishers** (`gz topic -i` confirms only the bridge subscribed). The `my_lrauv` model does not emit per-model pose on that topic; pose is only available via the aggregate `/world/save_arena/pose/info` / `dynamic_pose/info` topics. See Section 7 for the fix (add a `PosePublisher` plugin to `model.sdf`, or re-point the bridge at the world pose topic and filter by model name).
+
 ---
 
 ## 5. File & Directory Structure
@@ -145,6 +170,7 @@ A running log of every integration problem hit during setup, since each fix refl
 | `Could not find model.config ... in models/my_lrauv` | The download script fetched `model.sdf` + assets but not a manifest | Manually authored `model.config` declaring `model.sdf` as the SDF entry point |
 | No way to command the vehicle from ROS 2 | Humble ships no Harmonic-compatible bridge by default | Removed conflicting `ros-humble-ros-gz*`, installed `ros-humble-ros-gzharmonic` |
 | `sequence size exceeds remaining buffer` warning + unexpected topics (`/challenge_question`, `/state_estimation`, etc.) appearing in `ros2 topic list` | A separate, unrelated ROS 2 stack was already active on the default `ROS_DOMAIN_ID` (0), and its topics/types were entering our graph during discovery | Isolate the bridge and control terminals on a dedicated `ROS_DOMAIN_ID` (e.g. `42`) |
+| `/lrauv/pose` bridged but delivers no data | The `my_lrauv` model does not publish per-model pose on `/model/my_lrauv/pose`; `gz topic -i` shows zero publishers, so the bridge has nothing to forward. Pose is only exposed via the world-level `/world/save_arena/pose/info` / `dynamic_pose/info` topics | **Open** — add a `PosePublisher` system plugin to the vehicle in `model.sdf`, or re-point the bridge's pose entry at the world pose topic and filter by model name |
 
 ---
 
