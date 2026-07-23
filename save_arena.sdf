@@ -38,7 +38,11 @@
           <density>1</density>                    <!-- air, above the surface -->
         </density_change>
       </graded_buoyancy>
+<<<<<<< HEAD
       <enable>my_lrauv</enable>
+=======
+      <enable>bluerov2</enable>
+>>>>>>> 4b4bfc0 (using real auv)
     </plugin>
 
     <scene>
@@ -956,8 +960,13 @@
     -->
     
     <include>
+<<<<<<< HEAD
       <name>my_lrauv</name>
       <uri>model://my_lrauv</uri>
+=======
+      <name>bluerov2</name>
+      <uri>model://bluerov2</uri>
+>>>>>>> 4b4bfc0 (using real auv)
       <pose>-11 0 1.2 0 0 0</pose>
     </include>
    

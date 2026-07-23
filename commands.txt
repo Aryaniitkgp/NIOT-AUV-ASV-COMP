@@ -1,0 +1,5 @@
+terminal 1: gz sim -v 4 -r save_arena.sdf
+export GZ_SIM_RESOURCE_PATH=/home/aryan/bluerov2_gz/models:/home/aryan/bluerov2_gz/worlds:$GZ_SIM_RESOURCE_PATH
+
+terminal 2: ./bluerov2_native_bridge.py
+

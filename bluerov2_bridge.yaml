@@ -1,0 +1,168 @@
+# ==============================================================================
+# Gazebo Sim to ROS 2 Bridge Configuration for BlueROV2
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Simulation Clock (Essential for TF, timestamps, and ROS time synchronicity)
+# ------------------------------------------------------------------------------
+- ros_topic_name: "/clock"
+  gz_topic_name: "/world/save_arena/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# ------------------------------------------------------------------------------
+# 2. Joint States & Transforms
+# ------------------------------------------------------------------------------
+- ros_topic_name: "/joint_states"
+  gz_topic_name: "/world/save_arena/model/bluerov2/joint_state"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "gz.msgs.Model"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/tf"
+  gz_topic_name: "/world/save_arena/dynamic_pose/info"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+
+# ------------------------------------------------------------------------------
+# 3. Teleop / Movement Commands
+# ------------------------------------------------------------------------------
+- ros_topic_name: "/cmd_vel"
+  gz_topic_name: "/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+# ------------------------------------------------------------------------------
+# 4. Onboard Sensors (IMU, Depth, Air Pressure, Cameras)
+# ------------------------------------------------------------------------------
+# IMU Sensor
+- ros_topic_name: "/bluerov2/imu/data"
+  gz_topic_name: "/world/save_arena/model/bluerov2/link/base_link/sensor/imu_sensor/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+# Depth / Pressure Sensor
+- ros_topic_name: "/bluerov2/air_pressure"
+  gz_topic_name: "/world/save_arena/model/bluerov2/link/base_link/sensor/air_pressure_sensor/air_pressure"
+  ros_type_name: "sensor_msgs/msg/FluidPressure"
+  gz_type_name: "gz.msgs.FluidPressure"
+  direction: GZ_TO_ROS
+
+# Front Camera
+- ros_topic_name: "/bluerov2/front_camera/image_raw"
+  gz_topic_name: "/camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/bluerov2/front_camera/camera_info"
+  gz_topic_name: "/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+# Downward Camera (if present)
+- ros_topic_name: "/bluerov2/down_camera/image_raw"
+  gz_topic_name: "/down_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# ------------------------------------------------------------------------------
+# 5. Direct Thruster Controls (T1 through T6 for 6-DOF setup)
+# ------------------------------------------------------------------------------
+- ros_topic_name: "/bluerov2/cmd_thrust/t1"
+  gz_topic_name: "/model/bluerov2/joint/thruster1_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/bluerov2/cmd_thrust/t2"
+  gz_topic_name: "/model/bluerov2/joint/thruster2_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/bluerov2/cmd_thrust/t3"
+  gz_topic_name: "/model/bluerov2/joint/thruster3_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/bluerov2/cmd_thrust/t4"
+  gz_topic_name: "/model/bluerov2/joint/thruster4_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/bluerov2/cmd_thrust/t5"
+  gz_topic_name: "/model/bluerov2/joint/thruster5_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/bluerov2/cmd_thrust/t6"
+  gz_topic_name: "/model/bluerov2/joint/thruster6_joint/cmd_thrust"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+  # ==============================================================================
+# Corrected Bridge Config based on active Gazebo Topics
+# ==============================================================================
+
+# Simulation Clock
+- ros_topic_name: "/clock"
+  gz_topic_name: "/world/save_arena/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# Joint States
+- ros_topic_name: "/joint_states"
+  gz_topic_name: "/world/save_arena/model/bluerov2/joint_state"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "gz.msgs.Model"
+  direction: GZ_TO_ROS
+
+# Model Transforms / Pose
+- ros_topic_name: "/tf"
+  gz_topic_name: "/world/save_arena/dynamic_pose/info"
+  ros_type_name: "tf2_msgs/msg/TFMessage"
+  gz_type_name: "gz.msgs.Pose_V"
+  direction: GZ_TO_ROS
+
+# Cameras (These exist in your gz topic list!)
+- ros_topic_name: "/bluerov2/front_camera/image_raw"
+  gz_topic_name: "/camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/bluerov2/front_camera/camera_info"
+  gz_topic_name: "/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/bluerov2/down_camera/image_raw"
+  gz_topic_name: "/down_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/bluerov2/down_camera/camera_info"
+  gz_topic_name: "/down_camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+# Movement Command
+- ros_topic_name: "/cmd_vel"
+  gz_topic_name: "/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
