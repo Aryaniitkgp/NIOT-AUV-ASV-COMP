@@ -24,6 +24,10 @@
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+    </plugin>
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure">
+    </plugin>
     <!-- Buoyancy: GRADED mode so buoyant force only exists BELOW the water
          surface. The water box spans z=0..2.5, so the surface is at z=2.5.
          Above 2.5 the density is ~air (1 kg/m^3) => the vehicle regains its
@@ -38,11 +42,7 @@
           <density>1</density>                    <!-- air, above the surface -->
         </density_change>
       </graded_buoyancy>
-<<<<<<< HEAD
-      <enable>my_lrauv</enable>
-=======
       <enable>bluerov2</enable>
->>>>>>> 4b4bfc0 (using real auv)
     </plugin>
 
     <scene>
@@ -960,13 +960,8 @@
     -->
     
     <include>
-<<<<<<< HEAD
-      <name>my_lrauv</name>
-      <uri>model://my_lrauv</uri>
-=======
       <name>bluerov2</name>
       <uri>model://bluerov2</uri>
->>>>>>> 4b4bfc0 (using real auv)
       <pose>-11 0 1.2 0 0 0</pose>
     </include>
    

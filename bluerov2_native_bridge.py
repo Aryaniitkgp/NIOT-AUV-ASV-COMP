@@ -6,6 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # ROS 2 Message imports
 from sensor_msgs.msg import Image, Imu, FluidPressure, JointState
+from std_msgs.msg import Float64
 from rosgraph_msgs.msg import Clock
 from cv_bridge import CvBridge
 
@@ -16,6 +17,9 @@ from gz.msgs10.imu_pb2 import IMU as GzImu
 from gz.msgs10.fluid_pressure_pb2 import FluidPressure as GzFluidPressure
 from gz.msgs10.model_pb2 import Model as GzModel
 from gz.msgs10.clock_pb2 import Clock as GzClock
+from gz.msgs10.double_pb2 import Double as GzDouble
+
+NUM_THRUSTERS = 6  # matches the topics currently on your `gz topic -l` (bluerov2 base config)
 
 import cv2
 import numpy as np
@@ -65,7 +69,35 @@ class BlueROV2NativeBridge(Node):
         self.gz_node.subscribe(GzClock, '/world/save_arena/clock', self._clock_cb)
         self.gz_node.subscribe(GzModel, '/world/save_arena/model/bluerov2/joint_state', self._joint_state_cb)
 
+        # 4. Thruster Commands (ROS -> Gazebo, one Float64 topic per thruster)
+        self.thruster_pubs_gz = {}
+        self.thruster_subs_ros = []
+
+        for i in range(1, NUM_THRUSTERS + 1):
+            gz_topic = f'/model/bluerov2/joint/thruster{i}_joint/cmd_thrust'
+            gz_pub = self.gz_node.advertise(gz_topic, GzDouble)
+            self.thruster_pubs_gz[i] = gz_pub
+
+            ros_topic = f'/bluerov2/thruster{i}/cmd_thrust'
+            sub = self.create_subscription(
+                Float64,
+                ros_topic,
+                self._make_thruster_cb(i),
+                self.qos_profile,
+            )
+            self.thruster_subs_ros.append(sub)
+
         self.get_logger().info('🚀 BlueROV2 Native Bridge running smoothly without errors!')
+
+    def _make_thruster_cb(self, index):
+        def _cb(msg):
+            try:
+                gz_msg = GzDouble()
+                gz_msg.data = msg.data
+                self.thruster_pubs_gz[index].publish(gz_msg)
+            except Exception as e:
+                self.get_logger().error(f'Thruster {index} bridge error: {str(e)}')
+        return _cb
 
     def _camera_cb(self, gz_img, publisher, frame_id):
         try:
