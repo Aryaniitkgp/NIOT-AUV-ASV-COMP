@@ -3,3 +3,7 @@ export GZ_SIM_RESOURCE_PATH=/home/aryan/bluerov2_gz/models:/home/aryan/bluerov2_
 
 terminal 2: ./bluerov2_native_bridge.py
 
+terminal 3: ./thruster_mixer.py
+
+terminal 4: python3 line_follow.py
+
