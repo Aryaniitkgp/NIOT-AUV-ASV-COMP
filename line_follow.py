@@ -58,6 +58,7 @@ class LineFollower(Node):
 		self.upper_orange = np.array([30, 255, 255])
 		self.target_x = None
 		self.target_y = None
+		self.lookahead_pixels = 70
 		self.lost_threshold = 3
 
 		self.get_logger().info("Line follower started")
@@ -95,11 +96,12 @@ class LineFollower(Node):
 		height, width = frame.shape[:2]
 		center_x = width // 2
 		center_y = height // 2
+		target_y = max(0, center_y - self.lookahead_pixels)
 		self.target_x = center_x
-		self.target_y = center_y
-		target_on_line = mask[center_y, center_x] > 0
+		self.target_y = target_y
+		target_on_line = mask[target_y, center_x] > 0
 
-		self._draw_target(frame, center_x, center_y, target_on_line)
+		self._draw_target(frame, center_x, target_y, target_on_line)
 
 		if not contours:
 			self._handle_lost_line(frame, mask, center_x, center_y, "No path detected")
@@ -148,7 +150,7 @@ class LineFollower(Node):
 
 		if target_on_line:
 			forward_scale = 1.0 - min(abs(error), 1.0)
-			surge_cmd = self.forward_thrust * max(0.35, forward_scale)
+			surge_cmd = self.forward_thrust * max(0.45, forward_scale)
 		else:
 			surge_cmd = 0.0
 
@@ -158,7 +160,7 @@ class LineFollower(Node):
 		self._publish_command(surge_cmd, yaw_cmd)
 
 		state = "ON LINE" if target_on_line else "ALIGNING"
-		self._show_debug(frame, mask, center_x, center_y, (cx, cy), f"{state} err={error:.3f} yaw={yaw_cmd:.2f}")
+		self._show_debug(frame, mask, center_x, target_y, (cx, cy), f"{state} err={error:.3f} yaw={yaw_cmd:.2f}")
 
 	def _handle_lost_line(self, frame, mask, center_x, center_y, reason):
 		self.lost_frames += 1
