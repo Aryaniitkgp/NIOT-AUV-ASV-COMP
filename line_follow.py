@@ -8,7 +8,6 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float64
 
 from cv_bridge import CvBridge
-
 import cv2 as cv
 import numpy as np
 import math
@@ -16,221 +15,244 @@ import math
 
 class LineFollower(Node):
 
-	def __init__(self):
-		super().__init__("line_follower")
+    def __init__(self):
+        super().__init__("line_follower")
 
-		self.bridge = CvBridge()
+        self.bridge = CvBridge()
 
-		self.qos_profile = QoSProfile(
-			reliability=ReliabilityPolicy.BEST_EFFORT,
-			history=HistoryPolicy.KEEP_LAST,
-			depth=10,
-		)
+        self.qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
 
-		self.subscription = self.create_subscription(
-			Image,
-			"/bluerov2/down_camera/image_raw",
-			self.image_callback,
-			self.qos_profile,
-		)
+        self.subscription = self.create_subscription(
+            Image,
+            "/bluerov2/down_camera/image_raw",
+            self.image_callback,
+            self.qos_profile,
+        )
 
-		self.surge_pub = self.create_publisher(Float64, "/cmd_surge", 10)
-		self.yaw_pub = self.create_publisher(Float64, "/cmd_yaw", 10)
+        self.surge_pub = self.create_publisher(Float64, "/cmd_surge", 10)
+        self.yaw_pub = self.create_publisher(Float64, "/cmd_yaw", 10)
 
-		self.forward_thrust = 18.0
-		self.max_yaw = 25.0
-		self.max_surge = 18.0
+        # Control Parameters
+        self.forward_thrust = 14.0
+        self.max_yaw = 15.0
+        self.max_surge = 14.0
 
-		self.kp = 24.0
-		self.ki = 0.0
-		self.kd = 7.0
+        # Proportional steering gain for geometric line following
+        self.kp = 12.0
 
-		self.integral = 0.0
-		self.prev_error = 0.0
-		self.prev_time = None
-		self.lost_frames = 0
-		self.search_start_time = None
-		self.last_seen_error = 0.0
+        # Weighted Error Metrics
+        self.w_lateral = 0.6
+        self.w_heading = 0.4
 
-		self.kernel = np.ones((5, 5), np.uint8)
+        # State Variables
+        self.lost_frames = 0
+        self.search_start_time = None
+        self.last_seen_lateral_error = 0.0
+        self.last_seen_heading_error = 0.0
+        self.last_seen_error = 0.0
 
-		self.lower_orange = np.array([0, 50, 50])
-		self.upper_orange = np.array([30, 255, 255])
-		self.target_x = None
-		self.target_y = None
-		self.lookahead_pixels = 70
-		self.lost_threshold = 3
+        self.kernel = np.ones((5, 5), np.uint8)
 
-		self.get_logger().info("Line follower started")
+        # Robust HSV Range for Submerged Orange
+        self.lower_orange = np.array([2, 80, 50])
+        self.upper_orange = np.array([22, 255, 255])
+        
+        self.lookahead_pixels = 70
+        self.lost_threshold = 3
+        self.min_line_pixels_for_heading = 400
+        self.min_surge_scale = 0.35
+        self.debug_view_enabled = True
 
-	def _publish_command(self, surge, yaw):
-		surge_msg = Float64()
-		surge_msg.data = float(surge)
+        self.get_logger().info("Line follower optimized node started.")
 
-		yaw_msg = Float64()
-		yaw_msg.data = float(yaw)
+    def _publish_command(self, surge, yaw):
+        surge_msg = Float64(data=float(surge))
+        yaw_msg = Float64(data=float(yaw))
+        self.surge_pub.publish(surge_msg)
+        self.yaw_pub.publish(yaw_msg)
 
-		self.surge_pub.publish(surge_msg)
-		self.yaw_pub.publish(yaw_msg)
+    def _clamp(self, value, limit):
+        return max(-limit, min(limit, value))
 
-		self.get_logger().info(f"Publishing surge={surge:.2f} yaw={yaw:.2f}")
+    def image_callback(self, msg):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as exc:
+            self.get_logger().error(f"Image conversion failed: {exc}")
+            return
 
-	def _clamp(self, value, limit):
-		return max(-limit, min(limit, value))
+        height, width = frame.shape[:2]
+        center_x = width // 2
+        center_y = height // 2
+        target_y = max(0, center_y - self.lookahead_pixels)
 
-	def image_callback(self, msg):
-		try:
-			frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-		except Exception as exc:
-			self.get_logger().error(f"Image conversion failed: {exc}")
-			return
+        # Image Processing Pipeline
+        hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+        mask = cv.inRange(hsv, self.lower_orange, self.upper_orange)
+        mask = cv.morphologyEx(mask, cv.MORPH_OPEN, self.kernel, iterations=1)
+        mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, self.kernel, iterations=2)
 
-		hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
-		mask = cv.inRange(hsv, self.lower_orange, self.upper_orange)
+        contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
-		mask = cv.morphologyEx(mask, cv.MORPH_OPEN, self.kernel, iterations=1)
-		mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, self.kernel, iterations=2)
+        if not contours:
+            self._handle_lost_line(frame, mask, center_x, center_y, "No path detected")
+            return
 
-		contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        largest = max(contours, key=cv.contourArea)
+        contour_area = cv.contourArea(largest)
+        if contour_area < 250:
+            self._handle_lost_line(frame, mask, center_x, center_y, "Path too small")
+            return
 
-		height, width = frame.shape[:2]
-		center_x = width // 2
-		center_y = height // 2
-		target_y = max(0, center_y - self.lookahead_pixels)
-		self.target_x = center_x
-		self.target_y = target_y
-		target_on_line = mask[target_y, center_x] > 0
+        # Isolate target contour tracking
+        line_only_mask = np.zeros_like(mask)
+        cv.drawContours(line_only_mask, [largest], -1, 255, -1)
+        ys_all, xs_all = np.nonzero(line_only_mask)
 
-		self._draw_target(frame, center_x, target_y, target_on_line)
+        if len(xs_all) < 10:
+            self._handle_lost_line(frame, mask, center_x, center_y, "Insufficient pixels")
+            return
 
-		if not contours:
-			self._handle_lost_line(frame, mask, center_x, center_y, "No path detected")
-			return
+        # Fit a single line through the contour and use a lookahead point for steering.
+        pts = np.column_stack((xs_all, ys_all)).astype(np.float32)
+        vx, vy, x0, y0 = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01).flatten()
 
-		largest = max(contours, key=cv.contourArea)
-		area = cv.contourArea(largest)
+        if vy > 0:
+            vx, vy = -vx, -vy
 
-		if area < 250:
-			self._handle_lost_line(frame, mask, center_x, center_y, "Path too small")
-			return
+        if abs(vy) < 1e-4:
+            vy = -1e-4
 
-		moments = cv.moments(largest)
-		if moments["m00"] == 0:
-			self._publish_command(0.0, 0.0)
-			self._show_debug(frame, mask, center_x, center_y, None, "Invalid contour")
-			return
+        line_x_at_center = x0 + (vx / vy) * (center_y - y0)
+        line_x_at_target = x0 + (vx / vy) * (target_y - y0)
 
-		contour_points = largest.reshape(-1, 2)
-		distances = np.sum((contour_points - np.array([center_x, center_y])) ** 2, axis=1)
-		nearest_index = int(np.argmin(distances))
-		cx = int(contour_points[nearest_index][0])
-		cy = int(contour_points[nearest_index][1])
-		self.lost_frames = 0
-		self.search_start_time = None
+        lateral_error_center = (line_x_at_center - center_x) / float(center_x)
+        lateral_error_target = (line_x_at_target - center_x) / float(center_x)
 
-		# Use the target point at the center of the screen.
-		# If the point is not on the orange line, steer until the line covers it.
-		error = (center_x - cx) / float(center_x)
-		self.last_seen_error = error
+        heading_angle = math.atan2(vx, -vy)
+        heading_error = max(-1.0, min(1.0, heading_angle / (math.pi / 2)))
 
-		now = self.get_clock().now()
-		if self.prev_time is None:
-			dt = 0.0
-		else:
-			dt = (now - self.prev_time).nanoseconds / 1e9
+        x, y, w, h = cv.boundingRect(largest)
+        long_side = float(max(w, h))
+        short_side = float(max(1, min(w, h)))
+        aspect_ratio = long_side / short_side
+        low_confidence = pts.shape[0] < self.min_line_pixels_for_heading or aspect_ratio < 1.4
 
-		if dt > 0.0:
-			self.integral += error * dt
-			derivative = (error - self.prev_error) / dt
-		else:
-			derivative = 0.0
+        # Clear Tracking State
+        self.lost_frames = 0
+        self.search_start_time = None
 
-		yaw_cmd = self.kp * error + self.ki * self.integral + self.kd * derivative
-		yaw_cmd = self._clamp(yaw_cmd, self.max_yaw)
+        # Use the lookahead point as the main cross-track error and blend in heading.
+        lateral_error = (0.7 * lateral_error_target) + (0.3 * lateral_error_center)
+        error = self.w_lateral * lateral_error + self.w_heading * heading_error
+        error = max(-1.0, min(1.0, error))
+        self.last_seen_error = error
+        self.last_seen_lateral_error = lateral_error
+        self.last_seen_heading_error = heading_error
 
-		if target_on_line:
-			forward_scale = 1.0 - min(abs(error), 1.0)
-			surge_cmd = self.forward_thrust * max(0.45, forward_scale)
-		else:
-			surge_cmd = 0.0
+        # Calculate closed-loop steering. This is a geometry problem, so a
+        # simple proportional controller is more stable than a full PID here.
+        yaw_cmd = self._clamp(self.kp * error, self.max_yaw)
 
-		self.prev_error = error
-		self.prev_time = now
+        # Scale forward surge based on how well the line is centered and aligned.
+        alignment = 1.0 - min(1.0, 0.9 * abs(lateral_error) + 0.7 * abs(heading_error))
+        if low_confidence:
+            alignment *= 0.6
+        
+        surge_cmd = self.forward_thrust * max(self.min_surge_scale, alignment)
+        surge_cmd = min(surge_cmd, self.max_surge)
 
-		self._publish_command(surge_cmd, yaw_cmd)
+        self._publish_command(surge_cmd, yaw_cmd)
 
-		state = "ON LINE" if target_on_line else "ALIGNING"
-		self._show_debug(frame, mask, center_x, target_y, (cx, cy), f"{state} err={error:.3f} yaw={yaw_cmd:.2f}")
+        # Visual Feedback System
+        target_on_line = False
+        target_x = int(round(line_x_at_target))
+        target_y_int = int(target_y)
+        if 0 <= target_x < width and 0 <= target_y_int < height:
+            target_on_line = mask[target_y_int, target_x] > 0
 
-	def _handle_lost_line(self, frame, mask, center_x, center_y, reason):
-		self.lost_frames += 1
-		now = self.get_clock().now()
+        self._draw_target(frame, center_x, target_y, target_on_line)
+        state = "ON LINE" if abs(lateral_error) < 0.15 and abs(heading_error) < 0.25 else "ALIGNING"
+        if low_confidence:
+            state += " (LOW-CONF)"
+            
+        self._show_debug(
+            frame, mask, center_x, center_y,
+            near_point=(int(round(line_x_at_center)), center_y),
+            far_point=(target_x, target_y_int),
+            label=f"{state} | Lat Error: {lateral_error:.2f} | Hdg Error: {heading_error:.2f}",
+        )
 
-		if self.search_start_time is None:
-			self.search_start_time = now
+    def _handle_lost_line(self, frame, mask, center_x, center_y, reason):
+        self.lost_frames += 1
+        now = self.get_clock().now()
 
-		self.integral = 0.0
-		self.prev_error = 0.0
-		self.prev_time = now
+        now = self.get_clock().now()
 
-		if self.lost_frames < self.lost_threshold:
-			self._publish_command(0.0, 0.0)
-			self._show_debug(frame, mask, center_x, center_y, None, f"{reason} waiting")
-			return
+        if self.lost_frames < self.lost_threshold:
+            self._publish_command(0.0, 0.0)
+            self._show_debug(frame, mask, center_x, center_y, f"{reason}: Braking...")
+            return
 
-		elapsed = (now - self.search_start_time).nanoseconds / 1e9
-		scan_direction = 1.0 if self.last_seen_error >= 0.0 else -1.0
-		yaw_cmd = scan_direction * (0.6 * self.max_yaw) * math.sin(elapsed * 1.2)
-		yaw_cmd = self._clamp(yaw_cmd, self.max_yaw)
+        if self.search_start_time is None:
+            self.search_start_time = now
 
-		surge_cmd = 0.25 * self.forward_thrust
-		self._publish_command(surge_cmd, yaw_cmd)
-		self._show_debug(frame, mask, center_x, center_y, None, f"SEARCH yaw={yaw_cmd:.2f}")
+        # Hold a gentle turn toward the last seen side and rotate in place until
+        # the line re-enters the camera. Forward motion here tends to push the
+        # vehicle farther away from the path.
+        scan_direction = 1.0 if self.last_seen_lateral_error >= 0.0 else -1.0
+        yaw_cmd = scan_direction * (0.45 * self.max_yaw)
+        yaw_cmd = self._clamp(yaw_cmd, self.max_yaw)
+        
+        surge_cmd = 0.0
 
-	def _draw_target(self, frame, center_x, center_y, on_line):
-		color = (0, 255, 0) if on_line else (0, 0, 255)
-		cv.circle(frame, (center_x, center_y), 6, color, -1)
+        self._publish_command(surge_cmd, yaw_cmd)
+        self._show_debug(frame, mask, center_x, center_y, f"SEARCH MODE | Yaw Action: {yaw_cmd:.2f}")
 
-	def _show_debug(self, frame, mask, center_x, center_y, centroid, label):
-		height, _ = frame.shape[:2]
+    def _draw_target(self, frame, center_x, center_y, on_line):
+        color = (0, 255, 0) if on_line else (0, 0, 255)
+        cv.circle(frame, (center_x, center_y), 6, color, -1)
 
-		cv.line(frame, (center_x, 0), (center_x, height), (0, 0, 255), 2)
-		cv.line(frame, (0, center_y), (frame.shape[1], center_y), (0, 255, 255), 1)
+    def _show_debug(self, frame, mask, center_x, center_y, label, near_point=None, far_point=None):
+        if not self.debug_view_enabled:
+            return
 
-		if centroid is not None:
-			cx, cy = centroid
-			cv.circle(frame, (cx, cy), 6, (0, 255, 0), -1)
+        height, _ = frame.shape[:2]
+        cv.line(frame, (center_x, 0), (center_x, height), (0, 0, 255), 1)
+        cv.line(frame, (0, center_y), (frame.shape[1], center_y), (0, 255, 255), 1)
 
-		cv.putText(
-			frame,
-			label,
-			(20, 40),
-			cv.FONT_HERSHEY_SIMPLEX,
-			0.8,
-			(255, 255, 255),
-			2,
-		)
+        if near_point and (0 <= near_point[0] < frame.shape[1]):
+            cv.circle(frame, near_point, 6, (0, 255, 0), -1) 
+        if far_point and (0 <= far_point[0] < frame.shape[1]):
+            cv.circle(frame, far_point, 6, (255, 0, 255), -1) 
 
-		cv.imshow("AUV Camera", frame)
-		cv.imshow("Binary Mask", mask)
-		cv.waitKey(1)
+        cv.putText(frame, label, (15, 35), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        try:
+            cv.imshow("AUV Camera - Tracking View", frame)
+            cv.imshow("Binary Threshold Mask", mask)
+            cv.waitKey(1)
+            self.debug_view_enabled = True
+        except cv.error:
+            self.debug_view_enabled = False
 
 
 def main(args=None):
-	rclpy.init(args=args)
-
-	node = LineFollower()
-
-	try:
-		rclpy.spin(node)
-	except KeyboardInterrupt:
-		pass
-	finally:
-		cv.destroyAllWindows()
-		node.destroy_node()
-		if rclpy.ok():
-			rclpy.shutdown()
+    rclpy.init(args=args)
+    node = LineFollower()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cv.destroyAllWindows()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
-	main()
+    main()

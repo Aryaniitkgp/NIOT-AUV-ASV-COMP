@@ -1,0 +1,11 @@
+multiple FSM :
+
+mission 1 : line follower:
+
+mission 2 : search_buoy
+
+mission 3: search gate
+
+mission 4 : branches to select. Image->Marker Detection -> Classification-> Decision
+
+mission 5 : Image->Shape Detection->Polygon Approximation->Eight Sided Polygon->Center Estimation
