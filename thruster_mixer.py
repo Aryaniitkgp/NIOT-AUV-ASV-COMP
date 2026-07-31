@@ -20,7 +20,7 @@ class ThrusterMixer(Node):
         # Publishers
         self.thruster_pub = []
 
-        for i in range(1, 7):
+        for i in range(1, 9):
             pub = self.create_publisher(
                 Float64,
                 f"/bluerov2/thruster{i}/cmd_thrust",
@@ -107,10 +107,12 @@ class ThrusterMixer(Node):
 
         t5 = self.clamp(h)
         t6 = self.clamp(h)
+        t7 = self.clamp(h)
+        t8 = self.clamp(h)
 
-        values = [t1, t2, t3, t4, t5, t6]
+        values = [t1, t2, t3, t4, t5, t6, t7, t8]
 
-        for i in range(6):
+        for i in range(8):
 
             msg = Float64()
             msg.data = values[i]
@@ -123,7 +125,9 @@ class ThrusterMixer(Node):
             f"T3={t3:.2f} "
             f"T4={t4:.2f} "
             f"T5={t5:.2f} "
-            f"T6={t6:.2f}"
+            f"T6={t6:.2f} "
+            f"T7={t7:.2f} "
+            f"T8={t8:.2f}"
         )
 
 

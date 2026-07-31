@@ -19,7 +19,7 @@ from gz.msgs10.model_pb2 import Model as GzModel
 from gz.msgs10.clock_pb2 import Clock as GzClock
 from gz.msgs10.double_pb2 import Double as GzDouble
 
-NUM_THRUSTERS = 6  # matches the topics currently on your `gz topic -l` (bluerov2 base config)
+NUM_THRUSTERS = 8  # matches the topics currently on your `gz topic -l` (bluerov2 base config)
 
 import cv2
 import numpy as np

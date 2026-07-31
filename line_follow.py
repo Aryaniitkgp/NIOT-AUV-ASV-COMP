@@ -42,11 +42,11 @@ class LineFollower(Node):
         self.max_surge = 14.0
 
         # Proportional steering gain for geometric line following
-        self.kp = 12.0
+        self.kp = 25.0
 
         # Weighted Error Metrics
-        self.w_lateral = 0.6
-        self.w_heading = 0.4
+        self.w_lateral = 0.8
+        self.w_heading = 0.2
 
         # State Variables
         self.lost_frames = 0
@@ -147,7 +147,7 @@ class LineFollower(Node):
         self.search_start_time = None
 
         # Use the lookahead point as the main cross-track error and blend in heading.
-        lateral_error = (0.7 * lateral_error_target) + (0.3 * lateral_error_center)
+        lateral_error = lateral_error_target
         error = self.w_lateral * lateral_error + self.w_heading * heading_error
         error = max(-1.0, min(1.0, error))
         self.last_seen_error = error
@@ -159,11 +159,11 @@ class LineFollower(Node):
         yaw_cmd = self._clamp(self.kp * error, self.max_yaw)
 
         # Scale forward surge based on how well the line is centered and aligned.
-        alignment = 1.0 - min(1.0, 0.9 * abs(lateral_error) + 0.7 * abs(heading_error))
+        alignment = 1.0 - min(1.0, 0.5 * abs(lateral_error) + 0.3 * abs(heading_error))
         if low_confidence:
-            alignment *= 0.6
+            alignment *= 0.8
         
-        surge_cmd = self.forward_thrust * max(self.min_surge_scale, alignment)
+        surge_cmd = self.forward_thrust * max(0.5, alignment)
         surge_cmd = min(surge_cmd, self.max_surge)
 
         self._publish_command(surge_cmd, yaw_cmd)
