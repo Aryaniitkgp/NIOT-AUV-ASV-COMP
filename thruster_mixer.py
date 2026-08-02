@@ -7,6 +7,27 @@ from std_msgs.msg import Float64
 
 
 class ThrusterMixer(Node):
+    """Maps body-frame commands onto the 8 BlueROV2 thrusters.
+
+    Body frame is FLU: +x forward, +y left, +z up.
+
+    The four horizontal thrusters are vectored at 45 degrees, so their
+    contributions were measured straight off the model SDF (link poses +
+    joint axis 0 0 -1):
+
+        thruster   surge     sway     yaw(CCW)
+        T1 FR      -0.707   -0.707   -0.164
+        T2 FL      -0.707   +0.707   +0.164
+        T3 RR      +0.707   -0.707   +0.164
+        T4 RL      +0.707   +0.707   -0.164
+
+    Inverting that gives the sign pattern used below. Driving all four
+    with the same sign produces zero net force, which is why an even
+    +s on every thruster leaves the vehicle sitting still.
+
+    T5-T8 are vertical and point down for positive thrust, so they get
+    negated to make +heave mean up.
+    """
 
     def __init__(self):
 
@@ -14,6 +35,7 @@ class ThrusterMixer(Node):
 
         # Desired vehicle motion
         self.surge = 0.0
+        self.sway = 0.0
         self.yaw = 0.0
         self.heave = 0.0
 
@@ -33,6 +55,13 @@ class ThrusterMixer(Node):
             Float64,
             "/cmd_surge",
             self.surge_callback,
+            10,
+        )
+
+        self.create_subscription(
+            Float64,
+            "/cmd_sway",
+            self.sway_callback,
             10,
         )
 
@@ -58,76 +87,93 @@ class ThrusterMixer(Node):
 
         self.max_thrust = 40.0
 
+        # Zero the thrusters if the controller stops publishing, otherwise
+        # the last command keeps running after the node above it dies.
+        self.command_timeout = 1.0
+        self.last_command_time = self.get_clock().now()
+
         self.get_logger().info("Thruster Mixer Started")
 
     #################################################
 
     def surge_callback(self, msg):
         self.surge = msg.data
+        self.last_command_time = self.get_clock().now()
+
+    def sway_callback(self, msg):
+        self.sway = msg.data
+        self.last_command_time = self.get_clock().now()
 
     def yaw_callback(self, msg):
         self.yaw = msg.data
+        self.last_command_time = self.get_clock().now()
 
     def heave_callback(self, msg):
         self.heave = msg.data
+        self.last_command_time = self.get_clock().now()
 
     #################################################
 
-    def clamp(self, value):
+    def scale_to_limit(self, values):
+        """Scale the whole set down instead of clipping one thruster.
 
-        if value > self.max_thrust:
-            return self.max_thrust
+        Clipping a single thruster changes the direction of the resulting
+        force, so a hard turn would quietly turn into a turn plus drift.
+        """
+        peak = max(abs(v) for v in values)
 
-        if value < -self.max_thrust:
-            return -self.max_thrust
+        if peak > self.max_thrust:
+            factor = self.max_thrust / peak
+            return [v * factor for v in values]
 
-        return value
+        return values
 
     #################################################
 
     def publish_thrusters(self):
 
-        s = self.surge
-        y = self.yaw
-        h = self.heave
+        age = (self.get_clock().now() - self.last_command_time).nanoseconds * 1e-9
 
-        # Horizontal thrusters
+        if age > self.command_timeout:
+            s = w = y = h = 0.0
+        else:
+            s = self.surge
+            w = self.sway
+            y = self.yaw
+            h = self.heave
+
+        # Horizontal thrusters (vectored)
         #
-        # T1 Front Left
-        # T2 Front Right
-        # T3 Rear Left
-        # T4 Rear Right
+        # T1 Front Right
+        # T2 Front Left
+        # T3 Rear Right
+        # T4 Rear Left
 
-        t1 = self.clamp(s - y)
-        t2 = self.clamp(s + y)
-        t3 = self.clamp(s - y)
-        t4 = self.clamp(s + y)
+        t1 = -s - w - y
+        t2 = -s + w + y
+        t3 = s - w + y
+        t4 = s + w - y
 
-        # Vertical thrusters
+        # Vertical thrusters. Positive thrust pushes down, so negate
+        # to keep +heave meaning up.
 
-        t5 = self.clamp(h)
-        t6 = self.clamp(h)
-        t7 = self.clamp(h)
-        t8 = self.clamp(h)
+        t5 = -h
+        t6 = -h
+        t7 = -h
+        t8 = -h
 
-        values = [t1, t2, t3, t4, t5, t6, t7, t8]
+        values = self.scale_to_limit([t1, t2, t3, t4, t5, t6, t7, t8])
 
         for i in range(8):
 
             msg = Float64()
-            msg.data = values[i]
+            msg.data = float(values[i])
 
             self.thruster_pub[i].publish(msg)
 
         self.get_logger().info(
-            f"T1={t1:.2f} "
-            f"T2={t2:.2f} "
-            f"T3={t3:.2f} "
-            f"T4={t4:.2f} "
-            f"T5={t5:.2f} "
-            f"T6={t6:.2f} "
-            f"T7={t7:.2f} "
-            f"T8={t8:.2f}"
+            " ".join(f"T{i + 1}={values[i]:.2f}" for i in range(8)),
+            throttle_duration_sec=1.0,
         )
 
 

@@ -14,6 +14,24 @@ import math
 
 
 class LineFollower(Node):
+    """Follows the orange line using the down-facing camera.
+
+    Camera frame convention, taken from the down camera pose in the model
+    SDF (0 0 -0.05 0 1.571 0):
+
+        image up    -> vehicle forward (+x)
+        image right -> vehicle starboard (-y, because body +y is left)
+
+    So a positive lateral error means the line sits to starboard, and the
+    vehicle has to move/turn right. Body +sway is left and body +yaw is
+    counter-clockwise (left), which is why both commands are negated.
+
+    The vehicle is fully actuated in the horizontal plane and its sway
+    authority equals its surge authority, so cross-track error is taken
+    out with sway while yaw only has to keep the nose aligned with the
+    line. That decouples the two loops and stops the slalom you get when
+    yaw alone has to fix a sideways offset.
+    """
 
     def __init__(self):
         super().__init__("line_follower")
@@ -34,49 +52,81 @@ class LineFollower(Node):
         )
 
         self.surge_pub = self.create_publisher(Float64, "/cmd_surge", 10)
+        self.sway_pub = self.create_publisher(Float64, "/cmd_sway", 10)
         self.yaw_pub = self.create_publisher(Float64, "/cmd_yaw", 10)
+        self.heave_pub = self.create_publisher(Float64, "/cmd_heave", 10)
 
         # Control Parameters
-        self.forward_thrust = 14.0
-        self.max_yaw = 15.0
+        self.forward_thrust = 08.0
         self.max_surge = 14.0
+        self.max_sway = 12.0
+        self.max_yaw = 10.0
 
-        # Proportional steering gain for geometric line following
-        self.kp = 25.0
+        # Cross-track loop (drives sway) and heading loop (drives yaw).
+        self.kp_lateral = 16.0
+        self.kd_lateral = 4.0
+        self.kp_heading = 9.0
+        self.kd_heading = 2.0
 
-        # Weighted Error Metrics
-        self.w_lateral = 0.8
-        self.w_heading = 0.2
+        # Small amount of lateral error fed into yaw so the vehicle also
+        # points back at the line instead of crabbing along beside it.
+        self.k_lateral_to_yaw = 3.0
 
         # State Variables
         self.lost_frames = 0
         self.search_start_time = None
         self.last_seen_lateral_error = 0.0
-        self.last_seen_heading_error = 0.0
-        self.last_seen_error = 0.0
+        self.prev_lateral_error = 0.0
+        self.prev_heading_error = 0.0
+        self.prev_time = None
 
         self.kernel = np.ones((5, 5), np.uint8)
 
         # Robust HSV Range for Submerged Orange
         self.lower_orange = np.array([2, 80, 50])
         self.upper_orange = np.array([22, 255, 255])
-        
+
         self.lookahead_pixels = 70
+        self.band_half_height = 20
         self.lost_threshold = 3
-        self.min_line_pixels_for_heading = 400
+        self.search_timeout = 12.0
+        self.min_contour_area = 250
         self.min_surge_scale = 0.35
         self.debug_view_enabled = True
 
-        self.get_logger().info("Line follower optimized node started.")
+        self.get_logger().info("Line follower node started.")
 
-    def _publish_command(self, surge, yaw):
-        surge_msg = Float64(data=float(surge))
-        yaw_msg = Float64(data=float(yaw))
-        self.surge_pub.publish(surge_msg)
-        self.yaw_pub.publish(yaw_msg)
+    def _publish_command(self, surge, sway, yaw, heave=0.0):
+        self.surge_pub.publish(Float64(data=float(surge)))
+        self.sway_pub.publish(Float64(data=float(sway)))
+        self.yaw_pub.publish(Float64(data=float(yaw)))
+        self.heave_pub.publish(Float64(data=float(heave)))
 
     def _clamp(self, value, limit):
         return max(-limit, min(limit, value))
+
+    def _band_centroid(self, line_mask, row, half_height):
+        """Mean x of the line inside a horizontal strip, or None if empty.
+
+        Sampling the mask row-wise instead of fitting one straight line
+        across the whole contour keeps this stable on curves, and it can
+        never blow up the way a near-horizontal line fit does when the
+        slope goes to infinity.
+        """
+        height = line_mask.shape[0]
+        top = max(0, int(row) - half_height)
+        bottom = min(height, int(row) + half_height + 1)
+
+        if bottom <= top:
+            return None
+
+        band = line_mask[top:bottom]
+        xs = np.nonzero(band)[1]
+
+        if xs.size < 10:
+            return None
+
+        return float(xs.mean())
 
     def image_callback(self, msg):
         try:
@@ -88,7 +138,7 @@ class LineFollower(Node):
         height, width = frame.shape[:2]
         center_x = width // 2
         center_y = height // 2
-        target_y = max(0, center_y - self.lookahead_pixels)
+        target_y = max(self.band_half_height, center_y - self.lookahead_pixels)
 
         # Image Processing Pipeline
         hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
@@ -103,115 +153,136 @@ class LineFollower(Node):
             return
 
         largest = max(contours, key=cv.contourArea)
-        contour_area = cv.contourArea(largest)
-        if contour_area < 250:
+        if cv.contourArea(largest) < self.min_contour_area:
             self._handle_lost_line(frame, mask, center_x, center_y, "Path too small")
             return
 
         # Isolate target contour tracking
         line_only_mask = np.zeros_like(mask)
         cv.drawContours(line_only_mask, [largest], -1, 255, -1)
-        ys_all, xs_all = np.nonzero(line_only_mask)
 
-        if len(xs_all) < 10:
+        near_x = self._band_centroid(line_only_mask, center_y, self.band_half_height)
+        far_x = self._band_centroid(line_only_mask, target_y, self.band_half_height)
+
+        if near_x is None and far_x is None:
             self._handle_lost_line(frame, mask, center_x, center_y, "Insufficient pixels")
             return
 
-        # Fit a single line through the contour and use a lookahead point for steering.
-        pts = np.column_stack((xs_all, ys_all)).astype(np.float32)
-        vx, vy, x0, y0 = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01).flatten()
+        # Steer on the lookahead point when it exists, otherwise fall back
+        # to what is directly underneath.
+        steer_x = far_x if far_x is not None else near_x
+        lateral_error = (steer_x - center_x) / float(center_x)
+        lateral_error = self._clamp(lateral_error, 1.0)
 
-        if vy > 0:
-            vx, vy = -vx, -vy
-
-        if abs(vy) < 1e-4:
-            vy = -1e-4
-
-        line_x_at_center = x0 + (vx / vy) * (center_y - y0)
-        line_x_at_target = x0 + (vx / vy) * (target_y - y0)
-
-        lateral_error_center = (line_x_at_center - center_x) / float(center_x)
-        lateral_error_target = (line_x_at_target - center_x) / float(center_x)
-
-        heading_angle = math.atan2(vx, -vy)
-        heading_error = max(-1.0, min(1.0, heading_angle / (math.pi / 2)))
-
-        x, y, w, h = cv.boundingRect(largest)
-        long_side = float(max(w, h))
-        short_side = float(max(1, min(w, h)))
-        aspect_ratio = long_side / short_side
-        low_confidence = pts.shape[0] < self.min_line_pixels_for_heading or aspect_ratio < 1.4
+        # Heading from the near/far offset. Needs both bands, so on a short
+        # stub of line the vehicle just centres itself and creeps forward.
+        if near_x is not None and far_x is not None:
+            dx = far_x - near_x
+            dy = float(center_y - target_y)
+            heading_error = self._clamp(math.atan2(dx, dy) / (math.pi / 2), 1.0)
+            heading_valid = True
+        else:
+            heading_error = 0.0
+            heading_valid = False
 
         # Clear Tracking State
         self.lost_frames = 0
         self.search_start_time = None
-
-        # Use the lookahead point as the main cross-track error and blend in heading.
-        lateral_error = lateral_error_target
-        error = self.w_lateral * lateral_error + self.w_heading * heading_error
-        error = max(-1.0, min(1.0, error))
-        self.last_seen_error = error
         self.last_seen_lateral_error = lateral_error
-        self.last_seen_heading_error = heading_error
 
-        # Calculate closed-loop steering. This is a geometry problem, so a
-        # simple proportional controller is more stable than a full PID here.
-        yaw_cmd = self._clamp(self.kp * error, self.max_yaw)
+        # Derivatives, using real elapsed time so the damping does not
+        # change with camera frame rate.
+        now = self.get_clock().now()
+        dt = 0.0
+        if self.prev_time is not None:
+            dt = (now - self.prev_time).nanoseconds * 1e-9
 
-        # Scale forward surge based on how well the line is centered and aligned.
+        if 1e-3 < dt < 0.5:
+            d_lateral = (lateral_error - self.prev_lateral_error) / dt
+            d_heading = (heading_error - self.prev_heading_error) / dt
+        else:
+            d_lateral = 0.0
+            d_heading = 0.0
+
+        self.prev_time = now
+        self.prev_lateral_error = lateral_error
+        self.prev_heading_error = heading_error
+
+        # Image right is vehicle starboard, body +sway is left and body
+        # +yaw is counter-clockwise, so both commands get negated.
+        sway_cmd = -(self.kp_lateral * lateral_error + self.kd_lateral * d_lateral)
+        sway_cmd = self._clamp(sway_cmd, self.max_sway)
+
+        yaw_cmd = -(
+            self.kp_heading * heading_error
+            + self.kd_heading * d_heading
+            + self.k_lateral_to_yaw * lateral_error
+        )
+        yaw_cmd = self._clamp(yaw_cmd, self.max_yaw)
+
+        # Slow down when badly off the line so there is time to correct.
         alignment = 1.0 - min(1.0, 0.5 * abs(lateral_error) + 0.3 * abs(heading_error))
-        if low_confidence:
-            alignment *= 0.8
-        
-        surge_cmd = self.forward_thrust * max(0.5, alignment)
+        surge_cmd = self.forward_thrust * max(self.min_surge_scale, alignment)
         surge_cmd = min(surge_cmd, self.max_surge)
 
-        self._publish_command(surge_cmd, yaw_cmd)
+        self._publish_command(surge_cmd, sway_cmd, yaw_cmd, 0.0)
 
         # Visual Feedback System
-        target_on_line = False
-        target_x = int(round(line_x_at_target))
+        target_x = int(round(steer_x))
         target_y_int = int(target_y)
+        target_on_line = False
         if 0 <= target_x < width and 0 <= target_y_int < height:
-            target_on_line = mask[target_y_int, target_x] > 0
+            target_on_line = line_only_mask[target_y_int, target_x] > 0
 
-        self._draw_target(frame, center_x, target_y, target_on_line)
+        self._draw_target(frame, center_x, target_y_int, target_on_line)
+
         state = "ON LINE" if abs(lateral_error) < 0.15 and abs(heading_error) < 0.25 else "ALIGNING"
-        if low_confidence:
-            state += " (LOW-CONF)"
-            
+        if not heading_valid:
+            state += " (NO HDG)"
+
+        near_point = (int(round(near_x)), center_y) if near_x is not None else None
+
         self._show_debug(
             frame, mask, center_x, center_y,
-            near_point=(int(round(line_x_at_center)), center_y),
+            near_point=near_point,
             far_point=(target_x, target_y_int),
-            label=f"{state} | Lat Error: {lateral_error:.2f} | Hdg Error: {heading_error:.2f}",
+            label=(
+                f"{state} | lat {lateral_error:+.2f} hdg {heading_error:+.2f} "
+                f"| sway {sway_cmd:+.1f} yaw {yaw_cmd:+.1f}"
+            ),
         )
 
     def _handle_lost_line(self, frame, mask, center_x, center_y, reason):
         self.lost_frames += 1
         now = self.get_clock().now()
 
-        now = self.get_clock().now()
-
         if self.lost_frames < self.lost_threshold:
-            self._publish_command(0.0, 0.0)
+            self._publish_command(0.0, 0.0, 0.0, 0.0)
             self._show_debug(frame, mask, center_x, center_y, f"{reason}: Braking...")
             return
 
         if self.search_start_time is None:
             self.search_start_time = now
 
-        # Hold a gentle turn toward the last seen side and rotate in place until
-        # the line re-enters the camera. Forward motion here tends to push the
-        # vehicle farther away from the path.
-        scan_direction = 1.0 if self.last_seen_lateral_error >= 0.0 else -1.0
-        yaw_cmd = scan_direction * (0.45 * self.max_yaw)
-        yaw_cmd = self._clamp(yaw_cmd, self.max_yaw)
-        
-        surge_cmd = 0.0
+        elapsed = (now - self.search_start_time).nanoseconds * 1e-9
 
-        self._publish_command(surge_cmd, yaw_cmd)
-        self._show_debug(frame, mask, center_x, center_y, f"SEARCH MODE | Yaw Action: {yaw_cmd:.2f}")
+        if elapsed > self.search_timeout:
+            self._publish_command(0.0, 0.0, 0.0, 0.0)
+            self._show_debug(frame, mask, center_x, center_y, "SEARCH TIMEOUT | Holding")
+            return
+
+        # Move back toward whichever side the line was last on. Positive
+        # last error means it went off to starboard, so sway and yaw both
+        # go negative. No forward motion, that only widens the gap.
+        scan_direction = 1.0 if self.last_seen_lateral_error >= 0.0 else -1.0
+        sway_cmd = -scan_direction * (0.4 * self.max_sway)
+        yaw_cmd = -scan_direction * (0.45 * self.max_yaw)
+
+        self._publish_command(0.0, sway_cmd, yaw_cmd, 0.0)
+        self._show_debug(
+            frame, mask, center_x, center_y,
+            f"SEARCH | sway {sway_cmd:+.1f} yaw {yaw_cmd:+.1f} | {elapsed:.1f}s",
+        )
 
     def _draw_target(self, frame, center_x, center_y, on_line):
         color = (0, 255, 0) if on_line else (0, 0, 255)
@@ -226,16 +297,15 @@ class LineFollower(Node):
         cv.line(frame, (0, center_y), (frame.shape[1], center_y), (0, 255, 255), 1)
 
         if near_point and (0 <= near_point[0] < frame.shape[1]):
-            cv.circle(frame, near_point, 6, (0, 255, 0), -1) 
+            cv.circle(frame, near_point, 6, (0, 255, 0), -1)
         if far_point and (0 <= far_point[0] < frame.shape[1]):
-            cv.circle(frame, far_point, 6, (255, 0, 255), -1) 
+            cv.circle(frame, far_point, 6, (255, 0, 255), -1)
 
         cv.putText(frame, label, (15, 35), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         try:
             cv.imshow("AUV Camera - Tracking View", frame)
             cv.imshow("Binary Threshold Mask", mask)
             cv.waitKey(1)
-            self.debug_view_enabled = True
         except cv.error:
             self.debug_view_enabled = False
 
