@@ -6,5 +6,10 @@ terminal 2: ./bluerov2_native_bridge.py
 
 terminal 3: ./thruster_mixer.py
 
-terminal 4: python3 line_follow.py
+terminal 4: python3 mission_control.py     <- full mission: dive -> line follow -> buoy touch
+
+--- single behaviours, for tuning (neither holds depth) ---
+
+mission 1 only: python3 line_follow.py
+mission 2 only: python3 buoy.py
 

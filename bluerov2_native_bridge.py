@@ -7,6 +7,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 # ROS 2 Message imports
 from sensor_msgs.msg import Image, Imu, FluidPressure, JointState
 from std_msgs.msg import Float64
+from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
 from cv_bridge import CvBridge
 
@@ -14,12 +15,26 @@ from cv_bridge import CvBridge
 from gz.transport13 import Node as GzNode
 from gz.msgs10.image_pb2 import Image as GzImage, PixelFormatType
 from gz.msgs10.imu_pb2 import IMU as GzImu
-from gz.msgs10.fluid_pressure_pb2 import FluidPressure as GzFluidPressure
 from gz.msgs10.model_pb2 import Model as GzModel
 from gz.msgs10.clock_pb2 import Clock as GzClock
 from gz.msgs10.double_pb2 import Double as GzDouble
+from gz.msgs10.pose_v_pb2 import Pose_V as GzPoseV
+
+import time
 
 NUM_THRUSTERS = 8  # matches the topics currently on your `gz topic -l` (bluerov2 base config)
+
+VEHICLE_NAME = 'bluerov2'
+ODOM_PUBLISH_RATE = 50.0  # Hz; dynamic_pose/info arrives far faster than this
+
+# Depth reference. The world's water box spans z = 0 .. 2.5 and the
+# buoyancy plugin switches to air density above 2.5, so the free surface
+# is at z = 2.5 and depth below it is (2.5 - z). Density matches the
+# buoyancy plugin's <default_density>.
+WATER_SURFACE_Z = 2.5
+WATER_DENSITY = 1000.0
+GRAVITY = 9.81
+ATMOSPHERIC_PA = 101325.0
 
 import cv2
 import numpy as np
@@ -53,14 +68,23 @@ class BlueROV2NativeBridge(Node):
         self.gz_node.subscribe(GzImage, '/down_camera/image_raw', lambda msg: self._camera_cb(msg, self.pub_down_cam, "down_camera"))
 
         # 2. Sensor Topics
+        #
+        # There is deliberately no air_pressure subscription here. The
+        # bluerov2 model SDF declares only an IMU and the two cameras, so
+        # that gz topic never exists - and even if the sensor were added,
+        # gz's AirPressure sensor models the standard *atmosphere*, which
+        # loses about 12 Pa per metre of altitude and knows nothing about
+        # a water column. Inverting it for depth would be meaningless.
+        #
+        # So the depth sensor is synthesised below from the vehicle pose,
+        # which is the honest way to stand in for the pressure sensor a
+        # real BlueROV2 carries.
         self.pub_imu = self.create_publisher(Imu, '/bluerov2/imu/data', self.qos_profile)
-        self.pub_pressure = self.create_publisher(FluidPressure, '/bluerov2/air_pressure', self.qos_profile)
+        self.pub_pressure = self.create_publisher(FluidPressure, '/bluerov2/pressure', self.qos_profile)
+        self.pub_depth = self.create_publisher(Float64, '/bluerov2/depth', self.qos_profile)
 
         gz_imu_topic = '/world/save_arena/model/bluerov2/link/base_link/sensor/imu_sensor/imu'
-        gz_press_topic = '/world/save_arena/model/bluerov2/link/base_link/sensor/air_pressure_sensor/air_pressure'
-
         self.gz_node.subscribe(GzImu, gz_imu_topic, self._imu_cb)
-        self.gz_node.subscribe(GzFluidPressure, gz_press_topic, self._pressure_cb)
 
         # 3. Simulation Clock & Joint States
         self.pub_clock = self.create_publisher(Clock, '/clock', 10)
@@ -68,6 +92,25 @@ class BlueROV2NativeBridge(Node):
 
         self.gz_node.subscribe(GzClock, '/world/save_arena/clock', self._clock_cb)
         self.gz_node.subscribe(GzModel, '/world/save_arena/model/bluerov2/joint_state', self._joint_state_cb)
+
+        # 3b. Vehicle pose -> Odometry.
+        #
+        # The model carries no depth sensor (and gz's air pressure sensor
+        # models the atmosphere, not a water column), so the world pose
+        # published by SceneBroadcaster stands in for the pressure/DVL
+        # solution a real vehicle would run. Depth hold needs it.
+        self.pub_odom = self.create_publisher(Odometry, '/bluerov2/odom', self.qos_profile)
+
+        self._odom_last_wall = None
+        self._odom_last_pos = None
+        self._odom_vel = [0.0, 0.0, 0.0]
+        self._odom_last_publish = 0.0
+        self._last_pose_position = None
+
+        self._last_pressure_pa = ATMOSPHERIC_PA
+
+        self.gz_node.subscribe(GzPoseV, '/world/save_arena/dynamic_pose/info', self._pose_cb)
+        self.create_timer(0.05, self._depth_timer_cb)
 
         # 4. Thruster Commands (ROS -> Gazebo, one Float64 topic per thruster)
         self.thruster_pubs_gz = {}
@@ -138,16 +181,86 @@ class BlueROV2NativeBridge(Node):
         except Exception as e:
             self.get_logger().error(f'IMU bridge error: {str(e)}')
 
-    def _pressure_cb(self, gz_press):
+    def _depth_timer_cb(self):
+        """Synthesise the depth sensor the model does not carry.
+
+        World z is up-positive with the pool floor at z = 0, so depth
+        below the free surface is (WATER_SURFACE_Z - z), never -z. Getting
+        that reference wrong pins the reading at zero for the whole run,
+        because the vehicle never goes below z = 0 in the first place.
+        """
+        if self._last_pose_position is None:
+            return
+
+        depth_m = max(0.0, WATER_SURFACE_Z - self._last_pose_position[2])
+        self._last_pressure_pa = ATMOSPHERIC_PA + WATER_DENSITY * GRAVITY * depth_m
+
         try:
             msg = FluidPressure()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = "bluerov2/base_link"
-            msg.fluid_pressure = gz_press.pressure
-
+            msg.fluid_pressure = float(self._last_pressure_pa)
             self.pub_pressure.publish(msg)
+
+            self.pub_depth.publish(Float64(data=float(depth_m)))
         except Exception as e:
-            self.get_logger().error(f'Fluid pressure bridge error: {str(e)}')
+            self.get_logger().error(f'Depth bridge error: {str(e)}')
+
+    def _pose_cb(self, gz_pose_v):
+        try:
+            pose = None
+            for candidate in gz_pose_v.pose:
+                if candidate.name == VEHICLE_NAME:
+                    pose = candidate
+                    break
+
+            if pose is None:
+                return
+
+            now = time.monotonic()
+            position = (pose.position.x, pose.position.y, pose.position.z)
+
+            # Velocity by differencing, low-pass filtered. dynamic_pose/info
+            # carries no twist, and the depth loop damps on the measured
+            # rate, so it has to be reconstructed here where the sample
+            # rate is highest.
+            if self._odom_last_wall is not None:
+                dt = now - self._odom_last_wall
+                if 1e-4 < dt < 0.5:
+                    alpha = 0.2
+                    for i in range(3):
+                        raw = (position[i] - self._odom_last_pos[i]) / dt
+                        self._odom_vel[i] = (1.0 - alpha) * self._odom_vel[i] + alpha * raw
+
+            self._odom_last_wall = now
+            self._odom_last_pos = position
+            self._last_pose_position = position
+
+            if now - self._odom_last_publish < 1.0 / ODOM_PUBLISH_RATE:
+                return
+            self._odom_last_publish = now
+
+            msg = Odometry()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'world'
+            msg.child_frame_id = 'bluerov2/base_link'
+
+            msg.pose.pose.position.x = position[0]
+            msg.pose.pose.position.y = position[1]
+            msg.pose.pose.position.z = position[2]
+            msg.pose.pose.orientation.x = pose.orientation.x
+            msg.pose.pose.orientation.y = pose.orientation.y
+            msg.pose.pose.orientation.z = pose.orientation.z
+            msg.pose.pose.orientation.w = pose.orientation.w
+
+            # World-frame velocity, not body frame. Depth only needs z.
+            msg.twist.twist.linear.x = self._odom_vel[0]
+            msg.twist.twist.linear.y = self._odom_vel[1]
+            msg.twist.twist.linear.z = self._odom_vel[2]
+
+            self.pub_odom.publish(msg)
+        except Exception as e:
+            self.get_logger().error(f'Pose bridge error: {str(e)}')
 
     def _clock_cb(self, gz_clock):
         try:
