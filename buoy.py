@@ -139,9 +139,23 @@ class BuoyServoController:
         # the servo swap targets halfway in and stall between the two.
         self.locked_color = None
 
-        # Focal length in pixels, filled in from the first frame because
-        # the bridge rescales everything to a fixed size anyway.
+        # Camera intrinsics. Left as None until either set_intrinsics() is
+        # called with a real calibration or detect() falls back to deriving
+        # them from the nominal FOV above.
+        #
+        # This MUST come from a calibration shot underwater, in the housing
+        # the camera will actually fly in. A flat viewport refracts light on
+        # the way in (water n = 1.33 into air n = 1.0), which scales the
+        # effective focal length by about 1.33 and adds radial distortion
+        # that grows toward the frame edges. Range here is
+        # Z = R_real * f / R_pixels, so an air-calibrated f under a flat
+        # port reports every distance about 25% short - the vehicle would
+        # stop a good 12 cm before it ever reached the buoy.
         self.focal_px = None
+        self.center_u = None
+        self.center_v = None
+        self.dist_coeffs = None
+        self.camera_matrix = None
 
         # Detection gates
         self.min_area_px = 350.0
@@ -187,6 +201,31 @@ class BuoyServoController:
         self.lost_frames = 0
         self.last_ex = 0.0
 
+    def set_intrinsics(self, fx, fy, cx, cy, dist_coeffs=None):
+        """Install a real calibration, e.g. from a CameraInfo message."""
+        self.focal_px = float(fx)
+        self.center_u = float(cx)
+        self.center_v = float(cy)
+        self.camera_matrix = np.array(
+            [[float(fx), 0.0, float(cx)],
+             [0.0, float(fy), float(cy)],
+             [0.0, 0.0, 1.0]], dtype=np.float64)
+
+        if dist_coeffs is not None and any(abs(float(d)) > 1e-12 for d in dist_coeffs):
+            self.dist_coeffs = np.array([float(d) for d in dist_coeffs], dtype=np.float64)
+        else:
+            self.dist_coeffs = None
+
+    def _undistort(self, u, v):
+        """Straighten one point back onto the ideal pinhole image."""
+        if self.dist_coeffs is None or self.camera_matrix is None:
+            return u, v
+
+        src = np.array([[[float(u), float(v)]]], dtype=np.float64)
+        out = cv.undistortPoints(src, self.camera_matrix, self.dist_coeffs,
+                                 P=self.camera_matrix)
+        return float(out[0][0][0]), float(out[0][0][1])
+
     def reset(self):
         self.yaw_pid.reset()
         self.sway_pid.reset()
@@ -217,8 +256,8 @@ class BuoyServoController:
         contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
         found = []
 
-        u0 = width / 2.0
-        v0 = height / 2.0
+        u0 = self.center_u if self.center_u is not None else width / 2.0
+        v0 = self.center_v if self.center_v is not None else height / 2.0
 
         for contour in contours:
             area = cv.contourArea(contour)
@@ -243,11 +282,17 @@ class BuoyServoController:
             if aspect > self.max_aspect_ratio:
                 continue
 
+            # Straighten the centroid before measuring against the
+            # principal point. Under a flat port the distortion grows with
+            # radius, so a buoy out near the frame edge - exactly where the
+            # servo error is largest - is the worst case.
+            uu, vv = self._undistort(cx, cy)
+
             # Pixel errors, then normalised so the gains are resolution free.
             found.append(BuoyObservation(
                 u=cx, v=cy, radius_px=radius, area_px=area,
                 circularity=circularity,
-                ex=(cx - u0) / u0, ey=(cy - v0) / v0,
+                ex=(uu - u0) / u0, ey=(vv - v0) / v0,
                 distance=self.buoy_radius_m * self.focal_px / radius,
                 color=color,
             ))
@@ -272,7 +317,13 @@ class BuoyServoController:
         height, width = frame.shape[:2]
 
         if self.focal_px is None:
+            # No calibration supplied - fall back to the nominal FOV. Fine
+            # in sim, where the camera is an ideal pinhole with no viewport
+            # in the optical path. On the vehicle this is the 25%-short
+            # case: feed a real CameraInfo through set_intrinsics() instead.
             self.focal_px = (width / 2.0) / math.tan(self.horizontal_fov / 2.0)
+            self.center_u = width / 2.0
+            self.center_v = height / 2.0
 
         hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
 

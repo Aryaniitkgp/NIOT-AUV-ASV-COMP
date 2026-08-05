@@ -40,9 +40,12 @@ from nav_msgs.msg import Odometry
 from cv_bridge import CvBridge
 import cv2 as cv
 
+from sensor_msgs.msg import Imu, CameraInfo
+
 from line_follow import LineFollowController
 from buoy import BuoyServoController
 from depth_control import DepthController
+from depth_filter import DepthFilter, vertical_accel_from_imu
 
 
 class State:
@@ -78,6 +81,13 @@ class MissionControl(Node):
             Image, "/bluerov2/front_camera/image_raw", self._front_cb, qos)
         self.create_subscription(
             Odometry, "/bluerov2/odom", self._odom_cb, qos)
+        self.create_subscription(
+            Float64, "/bluerov2/depth", self._depth_cb, qos)
+        self.create_subscription(
+            Imu, "/bluerov2/imu/data", self._imu_cb, qos)
+        self.create_subscription(
+            CameraInfo, "/bluerov2/front_camera/camera_info",
+            self._front_info_cb, qos)
 
         self.surge_pub = self.create_publisher(Float64, "/cmd_surge", 10)
         self.sway_pub = self.create_publisher(Float64, "/cmd_sway", 10)
@@ -147,9 +157,23 @@ class MissionControl(Node):
         self.down_frame = None
         self.front_frame = None
 
+        # Estimated vertical state, from Bar30 + IMU. Set
+        # use_ground_truth_depth = True to bypass the estimator and fly on
+        # perfect odometry instead, for an A/B against the old behaviour.
+        self._intrinsics_set = False
+        self.use_ground_truth_depth = False
+        self.depth_filter = DepthFilter()
+        self.depth_meas = None
+        self.accel_up = None
+
         self.z = None
         self.z_rate = 0.0
         self.z_target = self.cruise_z
+
+        # Truth, for logging estimator error only - never fed to control.
+        self.true_z = None
+        self.true_z_rate = 0.0
+        self._est_err_peak = 0.0
 
         self.odom_wait = 0.0
         self.odom_warned = False
@@ -196,8 +220,49 @@ class MissionControl(Node):
             self.get_logger().error(f"Front camera conversion failed: {exc}")
 
     def _odom_cb(self, msg):
-        self.z = msg.pose.pose.position.z
-        self.z_rate = msg.twist.twist.linear.z
+        """Ground truth. Kept for scoring and estimator error only.
+
+        This is deliberately NOT fed to the controller: it is perfect,
+        instantaneous and unavailable on the real vehicle. Everything the
+        depth loop sees comes from the Bar30 + IMU estimator instead, so
+        the gains get tuned against something the hardware can actually
+        reproduce.
+        """
+        self.true_z = msg.pose.pose.position.z
+        self.true_z_rate = msg.twist.twist.linear.z
+
+        if self.use_ground_truth_depth:
+            self.z = self.true_z
+            self.z_rate = self.true_z_rate
+
+    def _depth_cb(self, msg):
+        """Noisy, quantised, delayed depth from the simulated Bar30."""
+        self.depth_meas = float(msg.data)
+
+    def _imu_cb(self, msg):
+        a = msg.linear_acceleration
+        self.accel_up = vertical_accel_from_imu(a.x, a.y, a.z)
+
+    def _front_info_cb(self, msg):
+        """Install the front camera's real intrinsics into the buoy servo.
+
+        Only once - the calibration does not change mid-run, and this
+        arrives at frame rate.
+        """
+        if self._intrinsics_set:
+            return
+
+        fx, fy = msg.k[0], msg.k[4]
+        cx, cy = msg.k[2], msg.k[5]
+        if fx <= 0.0 or fy <= 0.0:
+            return
+
+        self.buoy.set_intrinsics(fx, fy, cx, cy, msg.d)
+        self._intrinsics_set = True
+        self.get_logger().info(
+            f"Front camera intrinsics: fx={fx:.1f} cx={cx:.1f} cy={cy:.1f} "
+            f"dist={'yes' if any(abs(d) > 1e-12 for d in msg.d) else 'none'}"
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -221,6 +286,32 @@ class MissionControl(Node):
 
     def _set_depth_target(self, value):
         self.z_target = max(self.min_z, min(self.max_z, value))
+
+    def _update_depth_estimate(self, dt):
+        """Run the Bar30 + IMU filter once per control cycle.
+
+        Predict on every tick using the IMU (which arrives far faster than
+        the control loop), correct only when a fresh Bar30 sample has
+        turned up. That ordering is what keeps the estimate smooth between
+        the 20 Hz depth samples instead of stepping at each one.
+        """
+        if self.use_ground_truth_depth:
+            return
+
+        self.depth_filter.predict(dt, self.accel_up)
+
+        if self.depth_meas is not None:
+            # Sensor reads depth below the surface; the controller works
+            # in world z, which is up-positive.
+            self.depth_filter.update(self.surface_z - self.depth_meas)
+            self.depth_meas = None
+
+        if self.depth_filter.ready:
+            self.z = self.depth_filter.z
+            self.z_rate = self.depth_filter.vz
+
+            if self.true_z is not None:
+                self._est_err_peak = max(self._est_err_peak, abs(self.z - self.true_z))
 
     def _depth_command(self, dt):
         """Heave thrust from the depth loop, or an open-loop dive if blind."""
@@ -248,6 +339,8 @@ class MissionControl(Node):
 
         self.time_in_state += dt
         self.mission_time += dt
+
+        self._update_depth_estimate(dt)
         self._maybe_report_depth(dt)
 
         handler = {
@@ -284,15 +377,19 @@ class MissionControl(Node):
         if self.z is None:
             self.odom_wait += dt
             if self.odom_wait < 5.0:
-                self.get_logger().info("Waiting for /bluerov2/odom...",
+                self.get_logger().info("Waiting for depth estimate...",
                                        throttle_duration_sec=2.0)
                 return
             if not self.odom_warned:
                 self.get_logger().warn(
-                    "No odometry after 5 s - diving open loop. Check that "
-                    "bluerov2_native_bridge.py is running."
+                    "No depth after 5 s - diving open loop. Check that "
+                    "bluerov2_native_bridge.py is running and publishing "
+                    "/bluerov2/depth."
                 )
                 self.odom_warned = True
+        else:
+            source = "ground truth" if self.use_ground_truth_depth else "Bar30 + IMU"
+            self.get_logger().info(f"Depth estimate live ({source}).")
 
         self._set_depth_target(self.cruise_z)
         self.depth.reset()
@@ -599,9 +696,18 @@ class MissionControl(Node):
 
         depth_m, depth_pct = info
         pool_depth = max(1e-6, self.surface_z - self.floor_z)
+
+        # Estimator error against ground truth, so a drifting or noisy
+        # vertical estimate is visible in the log rather than only showing
+        # up as bad depth holding.
+        err = ""
+        if self.true_z is not None and self.z is not None:
+            err = (f" | est err {100.0 * (self.z - self.true_z):+.1f} cm"
+                   f" (peak {100.0 * self._est_err_peak:.1f})")
+
         print(
             f"[DEPTH] {reason}{reason and ' - ' if reason else ''}{depth_m:.2f} m / {depth_pct:.1f}% of pool depth"
-            f" | surface=0 m | floor={pool_depth:.2f} m",
+            f" | surface=0 m | floor={pool_depth:.2f} m{err}",
             flush=True,
         )
 

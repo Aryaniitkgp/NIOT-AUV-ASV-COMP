@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # ROS 2 Message imports
-from sensor_msgs.msg import Image, Imu, FluidPressure, JointState
+from sensor_msgs.msg import Image, Imu, FluidPressure, JointState, CameraInfo
 from std_msgs.msg import Float64
 from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
@@ -21,6 +21,8 @@ from gz.msgs10.double_pb2 import Double as GzDouble
 from gz.msgs10.pose_v_pb2 import Pose_V as GzPoseV
 
 import time
+import random
+from collections import deque
 
 NUM_THRUSTERS = 8  # matches the topics currently on your `gz topic -l` (bluerov2 base config)
 
@@ -48,6 +50,60 @@ PIXEL_FORMAT = {
     PixelFormatType.BGR_INT8: 'bgr8',
 }
 
+class Bar30Model:
+    """Simulates a Blue Robotics Bar30 (MS5837-30BA) depth sensor.
+
+    Ground truth from the physics engine is perfect, zero latency and
+    infinitely fast, which flatters any depth loop tuned against it. The
+    real part is none of those things, and the difference matters: a
+    derivative term tuned on clean truth will chatter badly once it is
+    fed a quantised, noisy, delayed measurement.
+
+    Three effects, in the order the hardware applies them:
+
+      1. Transport delay  - I2C conversion (~20 ms at max oversampling)
+                            plus driver and ROS hops.
+      2. Sensor noise     - roughly 0.3 mbar RMS, i.e. about 3 mm of
+                            water, at the highest OSR setting.
+      3. Quantisation     - the ADC resolves 0.2 mbar, about 2 mm.
+
+    Noise is added before quantisation because that is the physical
+    order: the ADC digitises an already-noisy analogue signal. Doing it
+    the other way round would hide the dithering that real noise gives
+    you for free.
+    """
+
+    def __init__(self, resolution_pa=20.0, noise_pa=30.0, latency_s=0.030, seed=None):
+        self.resolution_pa = resolution_pa
+        self.noise_pa = noise_pa
+        self.latency_s = latency_s
+        self._rng = random.Random(seed)
+        self._pipe = deque()
+
+    def sample(self, true_pressure_pa, now):
+        """Feed the current truth, get back what the sensor would report.
+
+        Returns None until the pipeline has been primed for latency_s,
+        which mirrors a real sensor not having a reading yet at boot.
+        """
+        self._pipe.append((now + self.latency_s, true_pressure_pa))
+
+        delayed = None
+        while self._pipe and self._pipe[0][0] <= now:
+            delayed = self._pipe.popleft()[1]
+
+        if delayed is None:
+            return None
+
+        if self.noise_pa > 0.0:
+            delayed += self._rng.gauss(0.0, self.noise_pa)
+
+        if self.resolution_pa > 0.0:
+            delayed = round(delayed / self.resolution_pa) * self.resolution_pa
+
+        return delayed
+
+
 class BlueROV2NativeBridge(Node):
     def __init__(self):
         super().__init__('bluerov2_native_bridge')
@@ -64,8 +120,25 @@ class BlueROV2NativeBridge(Node):
         self.pub_front_cam = self.create_publisher(Image, '/bluerov2/front_camera/image_raw', self.qos_profile)
         self.pub_down_cam = self.create_publisher(Image, '/bluerov2/down_camera/image_raw', self.qos_profile)
 
-        self.gz_node.subscribe(GzImage, '/camera/image_raw', lambda msg: self._camera_cb(msg, self.pub_front_cam, "front_camera"))
-        self.gz_node.subscribe(GzImage, '/down_camera/image_raw', lambda msg: self._camera_cb(msg, self.pub_down_cam, "down_camera"))
+        # Camera intrinsics, published alongside every frame.
+        #
+        # In sim the cameras are ideal pinholes, so K comes straight from
+        # the SDF field of view and D is zero. On the vehicle neither is
+        # true: a flat viewport refracts water (n=1.33) into air (n=1.0),
+        # scaling the effective focal length by ~1.33 and adding radial
+        # distortion. Point calibration_file at an underwater OpenCV
+        # calibration and it overrides these numbers, so nothing
+        # downstream has to change to move from sim to hardware.
+        self.declare_parameter('camera_hfov', 1.047)   # matches model.sdf
+        self.declare_parameter('calibration_file', '')
+
+        self.pub_front_info = self.create_publisher(CameraInfo, '/bluerov2/front_camera/camera_info', self.qos_profile)
+        self.pub_down_info = self.create_publisher(CameraInfo, '/bluerov2/down_camera/camera_info', self.qos_profile)
+
+        self._camera_info = self._build_camera_info()
+
+        self.gz_node.subscribe(GzImage, '/camera/image_raw', lambda msg: self._camera_cb(msg, self.pub_front_cam, "front_camera", self.pub_front_info))
+        self.gz_node.subscribe(GzImage, '/down_camera/image_raw', lambda msg: self._camera_cb(msg, self.pub_down_cam, "down_camera", self.pub_down_info))
 
         # 2. Sensor Topics
         #
@@ -109,8 +182,31 @@ class BlueROV2NativeBridge(Node):
 
         self._last_pressure_pa = ATMOSPHERIC_PA
 
+        # Bar30 characteristics, exposed so the whole sensor model can be
+        # switched off (bar30_realistic:=false) to get the old perfect
+        # reading back for an A/B comparison.
+        self.declare_parameter('bar30_realistic', True)
+        self.declare_parameter('bar30_rate_hz', 20.0)
+        self.declare_parameter('bar30_resolution_pa', 20.0)   # 0.2 mbar ~ 2 mm
+        self.declare_parameter('bar30_noise_pa', 30.0)        # 0.3 mbar ~ 3 mm RMS
+        self.declare_parameter('bar30_latency_ms', 30.0)
+
+        realistic = self.get_parameter('bar30_realistic').value
+        rate_hz = max(1.0, float(self.get_parameter('bar30_rate_hz').value))
+
+        self.bar30 = Bar30Model(
+            resolution_pa=float(self.get_parameter('bar30_resolution_pa').value) if realistic else 0.0,
+            noise_pa=float(self.get_parameter('bar30_noise_pa').value) if realistic else 0.0,
+            latency_s=float(self.get_parameter('bar30_latency_ms').value) * 1e-3 if realistic else 0.0,
+        )
+
         self.gz_node.subscribe(GzPoseV, '/world/save_arena/dynamic_pose/info', self._pose_cb)
-        self.create_timer(0.05, self._depth_timer_cb)
+        self.create_timer(1.0 / rate_hz, self._depth_timer_cb)
+
+        self.get_logger().info(
+            f'Bar30 model: {"realistic" if realistic else "IDEAL (noise off)"} '
+            f'@ {rate_hz:.0f} Hz'
+        )
 
         # 4. Thruster Commands (ROS -> Gazebo, one Float64 topic per thruster)
         self.thruster_pubs_gz = {}
@@ -142,7 +238,58 @@ class BlueROV2NativeBridge(Node):
                 self.get_logger().error(f'Thruster {index} bridge error: {str(e)}')
         return _cb
 
-    def _camera_cb(self, gz_img, publisher, frame_id):
+    def _build_camera_info(self):
+        """Intrinsics for the 640x480 frames this bridge publishes.
+
+        A calibration_file, if given, wins. It is the plain OpenCV YAML
+        you get out of cv.calibrateCamera: camera_matrix and
+        distortion_coefficients. Shoot it underwater, through the real
+        housing - a dry calibration does not describe the optics the
+        vehicle actually flies with.
+        """
+        width, height = 640, 480
+
+        path = str(self.get_parameter('calibration_file').value or '')
+        if path:
+            try:
+                fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+                k = fs.getNode('camera_matrix').mat()
+                d = fs.getNode('distortion_coefficients').mat()
+                fs.release()
+
+                info = CameraInfo()
+                info.width, info.height = width, height
+                info.distortion_model = 'plumb_bob'
+                info.k = [float(v) for v in k.flatten()]
+                info.d = [float(v) for v in d.flatten()]
+                info.p = [k[0][0], 0.0, k[0][2], 0.0,
+                          0.0, k[1][1], k[1][2], 0.0,
+                          0.0, 0.0, 1.0, 0.0]
+                self.get_logger().info(
+                    f'Loaded camera calibration from {path} (fx={k[0][0]:.1f} px)')
+                return info
+            except Exception as e:
+                self.get_logger().error(
+                    f'Could not read calibration_file {path}: {e}; '
+                    f'falling back to the nominal FOV.')
+
+        hfov = float(self.get_parameter('camera_hfov').value)
+        fx = (width / 2.0) / np.tan(hfov / 2.0)
+        cx, cy = width / 2.0, height / 2.0
+
+        info = CameraInfo()
+        info.width, info.height = width, height
+        info.distortion_model = 'plumb_bob'
+        info.k = [fx, 0.0, cx, 0.0, fx, cy, 0.0, 0.0, 1.0]
+        info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+        info.p = [fx, 0.0, cx, 0.0, 0.0, fx, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+
+        self.get_logger().info(
+            f'Camera intrinsics from nominal FOV: fx={fx:.1f} px, no distortion. '
+            f'Pass -p calibration_file:=<yaml> to use a real one.')
+        return info
+
+    def _camera_cb(self, gz_img, publisher, frame_id, info_publisher=None):
         try:
             encoding = PIXEL_FORMAT.get(gz_img.pixel_format_type, 'rgb8')
             channels = 1 if encoding.startswith('mono') else 3
@@ -155,6 +302,13 @@ class BlueROV2NativeBridge(Node):
             msg.header.frame_id = f"bluerov2/{frame_id}_optical_frame"
 
             publisher.publish(msg)
+
+            # Same stamp and frame as the image, so a consumer can pair
+            # them without guessing.
+            if info_publisher is not None:
+                info = self._camera_info
+                info.header = msg.header
+                info_publisher.publish(info)
         except Exception as e:
             self.get_logger().error(f'Camera bridge error ({frame_id}): {str(e)}')
 
@@ -192,17 +346,29 @@ class BlueROV2NativeBridge(Node):
         if self._last_pose_position is None:
             return
 
-        depth_m = max(0.0, WATER_SURFACE_Z - self._last_pose_position[2])
-        self._last_pressure_pa = ATMOSPHERIC_PA + WATER_DENSITY * GRAVITY * depth_m
+        true_depth_m = max(0.0, WATER_SURFACE_Z - self._last_pose_position[2])
+        true_pressure_pa = ATMOSPHERIC_PA + WATER_DENSITY * GRAVITY * true_depth_m
+
+        # Run the truth through the sensor model. Pressure is what the
+        # hardware actually measures, so noise/quantisation/latency are
+        # applied there and depth is derived from the result - not the
+        # other way round.
+        measured_pa = self.bar30.sample(true_pressure_pa, time.monotonic())
+        if measured_pa is None:
+            return
+
+        self._last_pressure_pa = measured_pa
+        measured_depth_m = max(0.0, (measured_pa - ATMOSPHERIC_PA) / (WATER_DENSITY * GRAVITY))
 
         try:
             msg = FluidPressure()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = "bluerov2/base_link"
-            msg.fluid_pressure = float(self._last_pressure_pa)
+            msg.fluid_pressure = float(measured_pa)
+            msg.variance = float(self.bar30.noise_pa ** 2)
             self.pub_pressure.publish(msg)
 
-            self.pub_depth.publish(Float64(data=float(depth_m)))
+            self.pub_depth.publish(Float64(data=float(measured_depth_m)))
         except Exception as e:
             self.get_logger().error(f'Depth bridge error: {str(e)}')
 

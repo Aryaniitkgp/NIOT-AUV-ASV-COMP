@@ -1,15 +1,88 @@
-terminal 1:
+================================================================
+ BlueROV2 SAVe simulation - run order
+================================================================
+
+Use /usr/bin/python3 explicitly, NOT bare "python3".
+
+  bluerov2_gz/.venv is first on PATH and does not expose the Gazebo
+  bindings (/usr/lib/python3/dist-packages/gz), so the bridge dies with
+  "ModuleNotFoundError: No module named 'gz'" under the venv interpreter.
+  /usr/bin/python3 has gz + rclpy + cv2 together.
+
+Every terminal needs ROS on the path first:
+
+  source /opt/ros/humble/setup.bash
+
+----------------------------------------------------------------
+ TERMINAL 1 - Gazebo
+----------------------------------------------------------------
 export GZ_SIM_RESOURCE_PATH=/home/aryan/niot/bluerov2_gz/models:/home/aryan/niot/bluerov2_gz/worlds:$GZ_SIM_RESOURCE_PATH
+cd /home/aryan/niot
 gz sim -v 4 -r save_arena.sdf
 
-terminal 2: ./bluerov2_native_bridge.py
+----------------------------------------------------------------
+ TERMINAL 2 - Gazebo <-> ROS bridge (cameras, IMU, Bar30, thrusters)
+----------------------------------------------------------------
+cd /home/aryan/niot
+/usr/bin/python3 bluerov2_native_bridge.py
 
-terminal 3: ./thruster_mixer.py
+  Bar30 is simulated with 30 ms latency, 0.3 mbar noise and 0.2 mbar
+  quantisation. To fly on a perfect depth reading instead (A/B test):
 
-terminal 4: python3 mission_control.py     <- full mission: dive -> line follow -> buoy touch
+    /usr/bin/python3 bluerov2_native_bridge.py --ros-args -p bar30_realistic:=false
 
---- single behaviours, for tuning (neither holds depth) ---
+  Other knobs: bar30_rate_hz, bar30_noise_pa, bar30_resolution_pa,
+  bar30_latency_ms.
 
-mission 1 only: python3 line_follow.py
-mission 2 only: python3 buoy.py
+----------------------------------------------------------------
+ TERMINAL 3 - thruster mixer (body commands -> 8 thrusters)
+----------------------------------------------------------------
+cd /home/aryan/niot
+/usr/bin/python3 thruster_mixer.py
 
+----------------------------------------------------------------
+ TERMINAL 4 - mission FSM
+----------------------------------------------------------------
+cd /home/aryan/niot
+/usr/bin/python3 line_buoy.py
+
+  Full mission: dive -> follow orange path -> approach and touch the
+  closest flower -> back off -> resume the path.
+
+  Two windows open: "Line Following - Down Camera" and
+  "Buoy Detection - Front Camera".
+
+  Keys in this terminal: r or f = print depth now, x = quit.
+
+----------------------------------------------------------------
+ Single behaviours, for tuning (neither holds depth)
+----------------------------------------------------------------
+/usr/bin/python3 line_follow.py      mission 1 only, down camera
+/usr/bin/python3 buoy.py             mission 2 only, front camera
+
+----------------------------------------------------------------
+ Useful while debugging
+----------------------------------------------------------------
+# Reset the world. Do this between runs - the vehicle is positively
+# buoyant and drifts to the surface once the controller stops.
+gz service -s /world/save_arena/control \
+  --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean \
+  --timeout 3000 --req 'reset: {all: true}'
+
+# Truth vs sensor
+ros2 topic echo /bluerov2/odom --once     # ground truth pose
+ros2 topic echo /bluerov2/depth           # noisy Bar30 depth
+ros2 topic echo /mission/state            # current FSM state
+
+# Commands going to the mixer
+ros2 topic echo /cmd_heave
+
+----------------------------------------------------------------
+ Gotchas
+----------------------------------------------------------------
+* Run ONE bridge only. Two copies both relay thrusters and both publish
+  odometry; check with:  pgrep -af bluerov2_native_bridge
+* Reset the world between runs (see above), or the vehicle starts from
+  wherever it drifted to and never finds the line.
+* Start order matters: Gazebo first, then the bridge. The bridge
+  subscribes to gz topics at construction.
