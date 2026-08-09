@@ -34,6 +34,15 @@ cd /home/aryan/niot
   Other knobs: bar30_rate_hz, bar30_noise_pa, bar30_resolution_pa,
   bar30_latency_ms.
 
+  Camera intrinsics are published on .../camera_info, derived from the
+  nominal FOV. That is correct for sim (ideal pinhole, no viewport). On
+  the vehicle, pass an underwater calibration or every range comes out
+  ~25% short:
+
+    /usr/bin/python3 bluerov2_native_bridge.py --ros-args -p calibration_file:=underwater.yaml
+
+  Marker size/mass for the dropper: marker_mass (0.25 kg), marker_radius.
+
 ----------------------------------------------------------------
  TERMINAL 3 - thruster mixer (body commands -> 8 thrusters)
 ----------------------------------------------------------------
@@ -46,13 +55,23 @@ cd /home/aryan/niot
 cd /home/aryan/niot
 /usr/bin/python3 line_buoy.py
 
-  Full mission: dive -> follow orange path -> approach and touch the
-  closest flower -> back off -> resume the path.
+  Full mission:
+    dive
+    -> follow the orange path
+    -> approach and touch the closest flower, back off
+    -> resume the path
+    -> centre over a bin, read its O/X symbol
+    -> step over it if it is the wrong one, else descend
+    -> stop, drop 2 markers
+    -> climb back to cruise and carry on
 
   Two windows open: "Line Following - Down Camera" and
   "Buoy Detection - Front Camera".
 
   Keys in this terminal: r or f = print depth now, x = quit.
+
+  Which bin to aim for is self.target_symbol in line_buoy.py - "X"
+  (the cross, at x=4.6) by default, "O" for the ring at x=3.6.
 
 ----------------------------------------------------------------
  Single behaviours, for tuning (neither holds depth)
@@ -76,6 +95,13 @@ ros2 topic echo /mission/state            # current FSM state
 
 # Commands going to the mixer
 ros2 topic echo /cmd_heave
+
+# Marker dropper: watch releases, or fire one by hand to test the spawn
+ros2 topic echo /bluerov2/drop_marker
+ros2 topic pub --once /bluerov2/drop_marker std_msgs/msg/Empty {}
+
+# Camera intrinsics actually in use
+ros2 topic echo /bluerov2/front_camera/camera_info --once
 
 ----------------------------------------------------------------
  Gotchas

@@ -25,6 +25,8 @@ the two camera streams are independent.
 """
 
 import sys
+import os
+import math
 import select
 import termios
 import tty
@@ -41,9 +43,12 @@ from cv_bridge import CvBridge
 import cv2 as cv
 
 from sensor_msgs.msg import Imu, CameraInfo
+from std_msgs.msg import Empty as EmptyMsg
 
 from line_follow import LineFollowController
 from buoy import BuoyServoController
+from marker import MarkerDropController
+from octagon import OctagonDetector
 from depth_control import DepthController
 from depth_filter import DepthFilter, vertical_accel_from_imu
 
@@ -57,6 +62,20 @@ class State:
     BUOY_TOUCH = "BUOY_TOUCH"
     BUOY_BACKOFF = "BUOY_BACKOFF"
 
+    # Mission 4 - marker dropping
+    BIN_APPROACH = "BIN_APPROACH"   # centre over a bin at cruise depth, classify
+    BIN_REJECT = "BIN_REJECT"       # wrong symbol, move on to the next bin
+    BIN_DESCEND = "BIN_DESCEND"     # drop toward release altitude, stay centred
+    BIN_HOLD = "BIN_HOLD"           # kill residual velocity before releasing
+    BIN_DROP = "BIN_DROP"           # release one marker
+    BIN_DONE = "BIN_DONE"           # climb back to cruise, resume the path
+
+    # Mission 6 - surfacing inside the octagon
+    OCTAGON_ARRIVE = "OCTAGON_ARRIVE"  # line has run out; creep to the centre
+    OCTAGON_HOLD = "OCTAGON_HOLD"      # kill horizontal velocity before rising
+    OCTAGON_ASCEND = "OCTAGON_ASCEND"  # rise, checking containment on the way
+    SURFACED = "SURFACED"              # mission complete
+
 
 class MissionControl(Node):
 
@@ -67,6 +86,8 @@ class MissionControl(Node):
 
         self.line = LineFollowController()
         self.buoy = BuoyServoController(colors=("red", "green", "yellow"))
+        self.marker = MarkerDropController()
+        self.octagon = OctagonDetector()
         self.depth = DepthController()
 
         qos = QoSProfile(
@@ -94,6 +115,7 @@ class MissionControl(Node):
         self.yaw_pub = self.create_publisher(Float64, "/cmd_yaw", 10)
         self.heave_pub = self.create_publisher(Float64, "/cmd_heave", 10)
         self.state_pub = self.create_publisher(String, "/mission/state", 10)
+        self.drop_pub = self.create_publisher(EmptyMsg, "/bluerov2/drop_marker", 10)
 
         # Mission parameters.
         #
@@ -117,7 +139,13 @@ class MissionControl(Node):
         # z = 1.0, so the buoy sits on the optical axis instead of down
         # near the bottom edge of the frame.
         self.cruise_depth = 1.5
-        self.min_depth = 0.30          # stay under the surface
+        # Shallowest the vehicle may ever go. 0.30 m was too generous: the
+        # visual servo integrates z_target upward while a target sits high
+        # in frame, and the clamp let it reach z = 2.20, which lifts the
+        # hull clear of the water and loses both buoyancy and the cameras.
+        # 0.90 m keeps a comfortable margin under the surface while still
+        # allowing the buoy climb-over at z = 1.28 (depth 1.22 m).
+        self.min_depth = 0.90
         self.max_depth = 2.05          # keep clear of the floor and the pipes
 
         self.dive_tolerance = 0.12
@@ -134,12 +162,143 @@ class MissionControl(Node):
         self.buoy_lost_frames_max = 6
         self.buoy_approach_timeout = 60.0
         self.buoy_search_timeout = 8.0
-        self.max_buoy_attempts = 2
+        # One spare attempt per flower, so a single failed approach does
+        # not end mission 2 while untouched buoys remain.
+        self.max_buoy_attempts = 5
 
+        # Touch geometry.
+        #
+        # Cruising at z = 1.00 puts the vehicle at exactly the flower
+        # CENTRE height, so closing on the target is a head-on collision
+        # rather than a touch. The spheres are r = 0.1145 centred at
+        # z = 1.00, so their tops are at z = 1.115; the hull bottom sits
+        # 0.035 above the vehicle origin.
+        #
+        # Riding at z = 1.28 puts the hull bottom at 1.315 - about 20 cm
+        # over the top of the sphere - so the vehicle passes OVER the buoy
+        # and brushes it, instead of driving into its equator. The vehicle
+        # climbs to this only for the final approach, so the buoy stays
+        # near the optical axis for detection at longer range.
+        self.buoy_touch_z = 1.28
+        # Start climbing well before contact. A real run triggered on the
+        # red flower at 1.64 m, which left only 0.44 m of closing before
+        # the climb began - the target left the frame during the manoeuvre
+        # and the approach collapsed into a search. Climbing from 2.0 m
+        # means the vehicle is already at touch height by the time the
+        # buoy fills the frame.
+        self.buoy_climb_distance = 2.00
+        # Range at which the approach hands over to the open-loop touch.
+        # Must be comfortably ABOVE the range where the buoy leaves the
+        # bottom of the frame (~0.70 m at the climb height), or the
+        # approach loses the target before it can ever commit.
+        self.buoy_commit_distance = 0.90
+        # How far the visual servo may move the depth setpoint either side
+        # of cruise depth while homing. Keeps a mis-detection from walking
+        # the vehicle to the surface or the floor.
+        self.buoy_servo_z_band = 0.35
+
+        # Open-loop run from buoy_commit_distance. At surge 2.5 the vehicle
+        # settles near 0.46 m/s, so ~1.9 s covers the ~0.7 m from the
+        # commit point to contact with a little margin.
         self.touch_surge = 2.5
-        self.touch_duration = 1.2
+        self.touch_duration = 1.9
         self.backoff_surge = -2.5
         self.backoff_duration = 2.0
+
+        # The mission scores "touch at least one buoy", so one is enough to
+        # satisfy it and lets the run get on to the L-bar and the bins.
+        # Raise to 3 to attempt every flower once the later missions are
+        # working - the machinery for it is already in place.
+        self.buoys_to_touch = 1
+
+        # Route at the fork.
+        #
+        # The path splits at (-3, 0) into two symmetric 45 degree legs.
+        # Body +y is port, and the bins sit at y = -4 (starboard), while
+        # the cupid torpedo target is at y = +4 (port). Marker dropping is
+        # implemented and the torpedo is not, so take the starboard leg.
+        #
+        # Set to "port" for the torpedo route, or None to let the vehicle
+        # drift onto whichever leg dominates - which is what it did before
+        # this existed, and it picked the unimplemented route.
+        self.route = "starboard"
+        self.line.branch_preference = self.route
+        self._fork_logged = False
+
+        # ---- Mission 6: surfacing inside the octagon ----------------
+        #
+        # left_2 terminates at (8, -5), which IS the octagon centre, so
+        # running out of line in the final leg means the vehicle has
+        # arrived. Only armed once the bins are done, or an ordinary
+        # mid-course line loss would trigger a premature surfacing.
+        self.octagon_lost_frames = 25     # line gone this long = end of path
+        self.octagon_creep_surge = 1.5
+        self.octagon_creep_time = 2.5     # ease into the centre after the line ends
+
+        self.octagon_hold_speed_mps = 0.06
+        self.octagon_hold_min_time = 1.5
+        self.octagon_hold_timeout = 10.0
+
+        # Ascent. The depth floor that stops the buoy servo walking the
+        # vehicle to the surface has to be lifted here - surfacing is the
+        # whole point of this state.
+        self.octagon_ascend_rate = 0.18   # m/s of setpoint travel
+        self.surface_depth = 0.12         # Bar30 depth counted as surfaced
+        self.octagon_ascend_timeout = 40.0
+
+        self.octagon_lost = 0
+        # Set once the line is re-acquired after the bins, so the
+        # end-of-course trigger cannot fire on the bin's own occlusion.
+        self.octagon_line_seen = False
+        self.octagon_done = False
+        self._octagon_reports = []
+
+        # ---- Mission 4: marker dropping -----------------------------
+        #
+        # Which bin to use. The two are told apart by the white symbol on
+        # their floor: a ring ("O") at x=3.6 and a cross ("X") at x=4.6.
+        self.target_symbol = "X"
+        self.markers_carried = 2
+
+        # Engagement. Bins are only looked for once the buoy is done, and
+        # the area gate keeps the transition from firing on a distant
+        # sliver of navy at the edge of frame.
+        self.bin_trigger_area_px = 12000.0
+        self.bin_trigger_frames = 4
+        self.bin_lost_frames_max = 8
+
+        # Release geometry. The bin rim is at z = 0.30 and the hull bottom
+        # sits 0.035 above the vehicle origin, so z = 0.75 clears the rim
+        # by about 0.45 m and leaves a 0.72 m fall onto the floor.
+        self.bin_drop_z = 0.75
+        self.bin_centre_tolerance_m = 0.06
+        self.bin_descend_tolerance_m = 0.12
+
+        # A marker inherits the vehicle's horizontal velocity. Falling
+        # 0.72 m at a realistic 0.5-1.0 m/s takes 0.7-1.4 s, so 0.3 m/s of
+        # residual drift would put it 0.2-0.4 m downrange against a bin
+        # half-width of only 0.32 m - a miss caused purely by not having
+        # stopped. Hence an explicit hold, gated on the visual speed
+        # estimate from the down camera.
+        self.bin_hold_speed_mps = 0.05
+        self.bin_hold_min_time = 1.0
+        self.bin_hold_timeout = 8.0
+
+        self.bin_drop_settle = 1.0
+
+        # Step-over after rejecting a bin. The two bins are only 1.0 m
+        # apart, and surge 2.5 settles near 0.46 m/s, so anything past
+        # ~1.2 s sails straight over the second bin and the vehicle spends
+        # the rest of the run looking for it downrange.
+        self.bin_reject_surge = 2.5
+        self.bin_reject_duration = 1.2
+        # Attempts before abandoning the bins, so a bin that cannot be
+        # held does not trap the run in an approach/lose loop.
+        self.max_bin_attempts = 3
+        # Forward creep while climbing out of a completed bin, so the
+        # vehicle clears the box and can see the line again.
+        self.bin_exit_surge = 2.0
+        self.bin_approach_timeout = 45.0
 
         self.control_period = 0.05     # 20 Hz
 
@@ -173,6 +332,7 @@ class MissionControl(Node):
         # Truth, for logging estimator error only - never fed to control.
         self.true_z = None
         self.true_z_rate = 0.0
+        self.true_xy = None
         self._est_err_peak = 0.0
 
         self.odom_wait = 0.0
@@ -183,8 +343,27 @@ class MissionControl(Node):
         self.buoy_attempts = 0
         self.buoy_hits = 0
         self.buoy_target_color = None
+        # Colours already touched, so the lookout re-arms on the remaining
+        # flowers instead of re-approaching one it has already scored.
+        self.buoys_touched = set()
+
+        self.bins_done = False
+        self.bin_hits = 0
+        self.bin_lost = 0
+        # Symbols already inspected and turned down, so the lookout does
+        # not walk straight back into the bin it just stepped over.
+        self.rejected_symbols = set()
+        self.markers_dropped = 0
+        self.bin_hold_elapsed = 0.0
+        self.bin_attempts = 0
+        self.drop_log = []
+        # One-shot latch for the marker release, armed by _transition.
+        self._drop_fired = False
 
         self.debug_view_enabled = True
+        # Disable debug GUI when running headless to avoid Qt plugin crashes.
+        if os.environ.get("QT_QPA_PLATFORM", "") == "offscreen" or not os.environ.get("DISPLAY"):
+            self.debug_view_enabled = False
 
         # Two live views, one per camera, both refreshed every control
         # cycle so neither goes stale while the other behaviour is in
@@ -230,6 +409,7 @@ class MissionControl(Node):
         """
         self.true_z = msg.pose.pose.position.z
         self.true_z_rate = msg.twist.twist.linear.z
+        self.true_xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
 
         if self.use_ground_truth_depth:
             self.z = self.true_z
@@ -276,6 +456,11 @@ class MissionControl(Node):
         )
         self.state = new_state
         self.time_in_state = 0.0
+
+        # Arm the one-shot marker release on every fresh entry into
+        # BIN_DROP, so the second marker gets its own trigger.
+        if new_state == State.BIN_DROP:
+            self._drop_fired = False
 
     def _publish(self, surge, sway, yaw, heave):
         self.surge_pub.publish(Float64(data=float(surge)))
@@ -351,6 +536,16 @@ class MissionControl(Node):
             State.BUOY_SEARCH: self._do_buoy_search,
             State.BUOY_TOUCH: self._do_buoy_touch,
             State.BUOY_BACKOFF: self._do_buoy_backoff,
+            State.BIN_APPROACH: self._do_bin_approach,
+            State.BIN_REJECT: self._do_bin_reject,
+            State.BIN_DESCEND: self._do_bin_descend,
+            State.BIN_HOLD: self._do_bin_hold,
+            State.BIN_DROP: self._do_bin_drop,
+            State.BIN_DONE: self._do_bin_done,
+            State.OCTAGON_ARRIVE: self._do_octagon_arrive,
+            State.OCTAGON_HOLD: self._do_octagon_hold,
+            State.OCTAGON_ASCEND: self._do_octagon_ascend,
+            State.SURFACED: self._do_surfaced,
         }[self.state]
 
         self.down_view = None
@@ -437,13 +632,85 @@ class MissionControl(Node):
         self.down_view = frame
         self.down_label = f"[{self.state}] {result.label}"
 
+        # Announce the fork once, when it is first resolved, so the route
+        # taken is visible in a headless log rather than only inferable
+        # from the trajectory afterwards.
+        if result.at_fork and not self._fork_logged and self.line.fork_frames >= 3:
+            self._fork_logged = True
+            dest = "bins (marker drop)" if self.route == "starboard" else "cupid (torpedo)"
+            self.get_logger().info(
+                f"*** FORK: {result.branches} legs seen, taking {self.route} "
+                f"-> {dest} ***")
+
+        # End of course. Both branches terminate at an octagon centre, so
+        # once the markers are done, the line running out is the arrival
+        # signal - there is nothing further to follow.
+        #
+        # Armed only after the bins, otherwise an ordinary mid-course
+        # dropout (glare, a gap, the vehicle crossing the L-bar) would be
+        # read as the end of the run.
+        if self.bins_done and not self.octagon_done:
+            # The trigger only arms once the line has actually been SEEN
+            # again since the bins finished.
+            #
+            # Without this the vehicle declares arrival immediately after
+            # BIN_DONE: the path runs directly beneath the bins (measured
+            # 0.12 m off centre at the O bin, against a 0.32 m half-width),
+            # so a 0.64 m navy box occludes it while the vehicle climbs
+            # back to cruise. A real run counted its 25 lost frames there
+            # and surfaced at x=4.08 - 5.2 m outside the ring.
+            if result.found:
+                self.octagon_line_seen = True
+                self.octagon_lost = 0
+            elif self.octagon_line_seen:
+                self.octagon_lost += 1
+
+            if (self.octagon_line_seen
+                    and self.octagon_lost >= self.octagon_lost_frames):
+                self._transition(
+                    State.OCTAGON_ARRIVE,
+                    f"line ended ({self.octagon_lost} frames) - at the octagon")
+                return
+        else:
+            self.octagon_lost = 0
+            self.octagon_line_seen = False
+
+        # Once the buoy is behind us the down camera doubles as the bin
+        # lookout. Detection shares the frame the line follower just used,
+        # so this costs one extra HSV pass and no extra latency.
+        if self.buoy_done and not self.bins_done and self.z is not None:
+            bins, _ = self.marker.detect(self.down_frame, self.z)
+            big = [b for b in bins
+                   if b.area_px >= self.bin_trigger_area_px
+                   and b.symbol not in self.rejected_symbols]
+
+            self.bin_hits = self.bin_hits + 1 if big else 0
+
+            if big:
+                b = big[0]
+                self.down_label += f" | bin {b.symbol or '?'} seen"
+
+            if self.bin_hits >= self.bin_trigger_frames:
+                self.bin_hits = 0
+                self.marker.reset()
+                self._transition(
+                    State.BIN_APPROACH,
+                    f"bin in view ({big[0].area_px:.0f} px)",
+                )
+                return
+
         # Front camera watches for the buoys in parallel. Detection runs
         # every frame so the view stays live, but the state change is
         # gated on the arming delay - without it the transition would fire
         # on the first frame of the run, when the red flower is already
         # dead ahead down the course.
         if not self.buoy_done:
-            obs, _, candidates = self.buoy.detect(self.front_frame)
+            _, _, candidates = self.buoy.detect(self.front_frame)
+
+            # Skip flowers already scored, then re-rank: largest apparent
+            # radius is nearest, since Z = R_real * f / R_pixels.
+            remaining = [c for c in candidates if c.color not in self.buoys_touched]
+            obs = max(remaining, key=lambda c: c.radius_px) if remaining else None
 
             front = self.front_frame.copy()
             if self.debug_view_enabled:
@@ -451,14 +718,26 @@ class MissionControl(Node):
             self.front_view = front
 
             armed = self.time_in_state > self.buoy_arm_delay
+            touched = f"{len(self.buoys_touched)}/{self.buoys_to_touch}"
             if obs is None:
-                self.front_label = "[WATCHING] no buoy"
+                self.front_label = f"[WATCHING] no new buoy | touched {touched}"
             else:
                 self.front_label = (
                     f"[WATCHING] closest {obs.color} {obs.distance:.2f}m "
-                    f"R {obs.radius_px:.0f}px ({len(candidates)} seen)"
+                    f"R {obs.radius_px:.0f}px | touched {touched}"
                     + ("" if armed else " | arming")
                 )
+
+            # Headless runs have no debug window, so without this there is
+            # no way to tell "detector saw nothing" from "saw something and
+            # rejected it" from "never reached this code at all".
+            self.get_logger().info(
+                f"WATCH armed={armed} cands={len(candidates)} "
+                + (f"best={obs.color}@{obs.distance:.2f}m R={obs.radius_px:.0f}px "
+                   f"(need {self.buoy_trigger_radius_px:.0f}) hits={self.buoy_hits}"
+                   if obs else "best=none"),
+                throttle_duration_sec=1.0,
+            )
 
             if not armed:
                 return
@@ -493,7 +772,17 @@ class MissionControl(Node):
 
     def _do_buoy_approach(self, dt):
         frame = self.front_frame.copy()
-        obs, _, candidates = self.buoy.detect(frame)
+        _, _, candidates = self.buoy.detect(frame)
+
+        # Honour the latch here too. detect() returns the globally closest
+        # candidate, so without this the approach silently retargets a
+        # different flower mid-run and the servo never converges on any of
+        # them.
+        wanted = self.buoy.locked_color
+        pool = [c for c in candidates if c.color not in self.buoys_touched]
+        if wanted is not None:
+            pool = [c for c in pool if c.color == wanted]
+        obs = max(pool, key=lambda c: c.radius_px) if pool else None
 
         self.front_view = frame
         self.down_label = f"[{self.state}] line following paused"
@@ -504,25 +793,61 @@ class MissionControl(Node):
             self._publish(0.0, 0.0, 0.0, heave)
 
             if self.buoy.lost_frames > self.buoy_lost_frames_max:
-                self._transition(State.BUOY_SEARCH, "buoy lost")
+                # Log what was actually in frame when the lock was lost -
+                # otherwise a headless run gives no way to tell "target
+                # left the field of view" from "detector rejected it".
+                seen = ", ".join(f"{c.color}@{c.distance:.2f}m" for c in candidates)
+                self._transition(
+                    State.BUOY_SEARCH,
+                    f"lost {wanted or 'buoy'}; in frame: {seen or 'nothing'}")
 
             self.front_label = f"[{self.state}] lost {self.buoy.lost_frames}"
             return
 
         self.buoy.lost_frames = 0
 
-        if obs.distance <= self.buoy.touch_distance:
+        # Commit to the touch while the buoy is still VISIBLE.
+        #
+        # Riding at z = 1.28 puts the camera 0.33 m above the sphere, and
+        # with a 23.4 deg vertical half-FOV the target falls out of the
+        # bottom of the frame at about 0.70 m range - well before the old
+        # 0.35 m touch threshold. The approach therefore lost the target
+        # every time and collapsed into a search, which is precisely the
+        # repeating cycle seen in the logs.
+        #
+        # Committing at commit_distance and running the last stretch open
+        # loop is the only option: no camera placement makes a target
+        # directly beneath the hull visible to a forward camera.
+        if obs.distance <= self.buoy_commit_distance:
             self._transition(State.BUOY_TOUCH,
-                             f"{obs.color} within {obs.distance:.2f} m")
+                             f"{obs.color} committed at {obs.distance:.2f} m")
             return
 
         surge, sway, yaw, heave_rate = self.buoy.compute(obs, dt)
 
-        # Outer loop: the vertical pixel error moves the depth setpoint,
-        # the depth loop turns that into thrust.
-        self._set_depth_target(self.z_target + heave_rate * dt)
-        heave = self._depth_command(dt)
+        # Vertical handling switches partway in.
+        #
+        # Far out, the visual servo owns depth: e_y drives a climb/descend
+        # rate so the buoy stays near the optical axis and detection stays
+        # good. Inside buoy_climb_distance that would fly the vehicle
+        # straight into the sphere's equator, so depth is instead commanded
+        # to buoy_touch_z and the vehicle rides OVER the target.
+        if obs.distance <= self.buoy_climb_distance:
+            self._set_depth_target(self.buoy_touch_z)
+            vertical = "climbing over"
+        else:
+            # Bound the servo's vertical authority to a band around cruise
+            # depth. Left unbounded it integrates z_target toward whatever
+            # the target's pixel elevation implies, and a target sitting
+            # high in frame will walk the vehicle all the way to the
+            # surface - which is exactly what happened before this clamp.
+            proposed = self.z_target + heave_rate * dt
+            lo = self.cruise_z - self.buoy_servo_z_band
+            hi = self.cruise_z + self.buoy_servo_z_band
+            self._set_depth_target(max(lo, min(hi, proposed)))
+            vertical = "servo"
 
+        heave = self._depth_command(dt)
         self._publish(surge, sway, yaw, heave)
 
         if self.time_in_state > self.buoy_approach_timeout:
@@ -534,12 +859,36 @@ class MissionControl(Node):
 
         self.front_label = (
             f"[{self.state}] {obs.color} ex {obs.ex:+.2f} ey {obs.ey:+.2f} "
-            f"R {obs.radius_px:.0f}px Z {obs.distance:.2f}m surge {surge:.1f}"
+            f"Z {obs.distance:.2f}m surge {surge:.1f} | {vertical}"
+        )
+
+        # Same line into the log. Headless runs have no debug window, so
+        # without this there is no record of how the approach progressed.
+        self.get_logger().info(
+            f"APPROACH {obs.color} Z={obs.distance:.2f}m R={obs.radius_px:.0f}px "
+            f"ex={obs.ex:+.2f} ey={obs.ey:+.2f} surge={surge:.1f} "
+            f"z={self.z:.2f}->{self.z_target:.2f} {vertical}",
+            throttle_duration_sec=0.5,
         )
 
     def _do_buoy_search(self, dt):
         frame = self.front_frame.copy()
-        obs, _, candidates = self.buoy.detect(frame)
+        _, _, candidates = self.buoy.detect(frame)
+
+        # Re-acquire the LATCHED colour only.
+        #
+        # Accepting any candidate here defeats the lock: the vehicle drops
+        # red, picks up yellow, loses it, picks up green, and thrashes
+        # between the flowers without ever committing. Observed in a real
+        # run as 40 approach/search cycles and zero touches.
+        #
+        # The lock is dropped further down once half the search timeout has
+        # elapsed, so a genuinely unreachable buoy is not a dead end.
+        wanted = self.buoy.locked_color
+        if wanted is not None:
+            candidates = [c for c in candidates if c.color == wanted]
+        candidates = [c for c in candidates if c.color not in self.buoys_touched]
+        obs = max(candidates, key=lambda c: c.radius_px) if candidates else None
 
         if self.debug_view_enabled:
             self.buoy.annotate(frame, obs, candidates)
@@ -571,9 +920,11 @@ class MissionControl(Node):
         self.front_label = f"[{self.state}] scanning {self.time_in_state:.1f}s"
 
     def _do_buoy_touch(self, dt):
-        # Open loop. Inside the last ~20 cm the sphere overflows the frame
-        # and the detection stops being trustworthy, so the contact is
-        # made on dead reckoning from the last good range estimate.
+        # Open loop, riding at buoy_touch_z so the hull passes over the
+        # sphere and brushes it. Inside the last ~20 cm the sphere
+        # overflows the frame and detection stops being trustworthy, so
+        # contact is made on dead reckoning from the last good range.
+        self._set_depth_target(self.buoy_touch_z)
         heave = self._depth_command(dt)
         self._publish(self.touch_surge, 0.0, 0.0, heave)
 
@@ -582,9 +933,12 @@ class MissionControl(Node):
         self.down_label = f"[{self.state}] line following paused"
 
         if self.time_in_state > self.touch_duration:
+            if self.buoy_target_color:
+                self.buoys_touched.add(self.buoy_target_color)
+
             self.get_logger().info(
                 f"*** {(self.buoy_target_color or 'buoy').upper()} BUOY TOUCHED "
-                f"- mission 2 complete ***"
+                f"({len(self.buoys_touched)}/{self.buoys_to_touch}) ***"
             )
             self._transition(State.BUOY_BACKOFF, "contact made")
 
@@ -596,23 +950,452 @@ class MissionControl(Node):
         self.down_label = f"[{self.state}] line following paused"
 
         if self.time_in_state > self.backoff_duration:
-            self.buoy_done = True
+            # Mission 2 only ends once every flower has been scored (or
+            # the attempt budget is spent). Otherwise re-arm and let the
+            # lookout pick up the next untouched colour.
+            if len(self.buoys_touched) >= self.buoys_to_touch:
+                self.buoy_done = True
+                reason = "all buoys touched, resuming mission 1"
+            else:
+                reason = (f"{len(self.buoys_touched)}/{self.buoys_to_touch} touched, "
+                          f"looking for the next")
+
+            self.buoy_target_color = None
             self.buoy.unlock()
+            self.buoy_hits = 0
             self.line.reset()
             self.depth.reset()
             self._set_depth_target(self.cruise_z)
-            self._transition(State.LINE_FOLLOW, "resuming mission 1")
+            self._transition(State.LINE_FOLLOW, reason)
+
+    # ------------------------------------------------------------------
+    # Mission 6 - surfacing inside the octagon
+
+    def _octagon_view(self, dt, annotate=True):
+        """Shared per-tick ring sensing on the FRONT camera."""
+        frame = self.front_frame.copy()
+        view, _ = self.octagon.detect(frame)
+
+        if annotate and self.debug_view_enabled:
+            self.octagon.annotate(frame, view)
+
+        self.front_view = frame
+        self.down_label = f"[{self.state}] path complete"
+        return view
+
+    def _do_octagon_arrive(self, dt):
+        """Creep the last little way onto the octagon centre.
+
+        The line ended, which by construction means the vehicle is at the
+        centre. A short creep covers the gap between losing sight of the
+        line and actually being over the terminus.
+        """
+        view = self._octagon_view(dt)
+        heave = self._depth_command(dt)
+        self._publish(self.octagon_creep_surge, 0.0, 0.0, heave)
+
+        self.front_label = (
+            f"[{self.state}] creeping {self.time_in_state:.1f}"
+            f"/{self.octagon_creep_time:.1f}s | ring {view.ring_px}px "
+            f"cov {view.coverage:.2f}")
+
+        if self.time_in_state > self.octagon_creep_time:
+            self.marker.reset()          # reuse its visual speed estimator
+            self._transition(State.OCTAGON_HOLD, "at the centre")
+
+    def _do_octagon_hold(self, dt):
+        """Kill horizontal velocity before rising.
+
+        Same reasoning as the marker release: commanding zero is not the
+        same as being stopped, and drifting sideways during a 1.5 m ascent
+        is how a vehicle ends up surfacing outside the ring.
+
+        Speed comes from the down camera, which still sees the floor here
+        even though the line has ended.
+        """
+        view = self._octagon_view(dt)
+        heave = self._depth_command(dt)
+        self._publish(0.0, 0.0, 0.0, heave)
+
+        # Track floor texture for the speed estimate. Any bin-like blob
+        # will do; the absolute reference does not matter, only its motion.
+        bins, _ = self.marker.detect(self.down_frame,
+                                     self.z if self.z else self.cruise_z)
+        self.marker.update_speed(bins[0] if bins else None,
+                                 self.z if self.z else self.cruise_z, dt)
+
+        speed = self.marker.speed_mps
+        self.front_label = (
+            f"[{self.state}] v={self._speed_text()} {self.time_in_state:.1f}s "
+            f"| ring cov {view.coverage:.2f}")
+
+        settled = (self.time_in_state > self.octagon_hold_min_time
+                   and (speed is None or speed < self.octagon_hold_speed_mps))
+
+        if settled or self.time_in_state > self.octagon_hold_timeout:
+            why = "stopped" if settled else "hold timed out"
+            self._octagon_reports = []
+            self._transition(State.OCTAGON_ASCEND, why)
+
+    def _do_octagon_ascend(self, dt):
+        """Rise to the surface, checking containment on the way up.
+
+        The containment test only works during the ascent: at cruise depth
+        the ring sits above the camera's field of view entirely, and only
+        comes level around z = 2.2. Measured on real frames, inside gives
+        ~600 px in the densest row over 13 rows; outside at 4 m gives ~98
+        over 29. That difference is the check.
+        """
+        # Walk the setpoint up. min_depth normally floors this to keep the
+        # buoy servo from surfacing the vehicle, so bypass the clamp here.
+        self.z_target = min(self.surface_z,
+                            self.z_target + self.octagon_ascend_rate * dt)
+        heave = self._depth_command(dt)
+        self._publish(0.0, 0.0, 0.0, heave)
+
+        view = self._octagon_view(dt)
+        depth = self.surface_z - self.z if self.z is not None else None
+
+        if view.ring_px >= self.octagon.min_ring_px:
+            self._octagon_reports.append(view.surrounded)
+
+        self.front_label = (
+            f"[{self.state}] depth {depth:.2f}m ring {view.ring_px}px "
+            f"cov {view.coverage:.2f} peak {view.peak_row_px} "
+            f"{'INSIDE' if view.surrounded else 'checking'}"
+            if depth is not None else f"[{self.state}] rising")
+
+        self.get_logger().info(
+            f"ASCEND depth={depth:.2f}m z={self.z:.2f}->{self.z_target:.2f} "
+            f"ring={view.ring_px}px cov={view.coverage:.2f} "
+            f"peak={view.peak_row_px} rows={view.rows} "
+            f"inside={view.surrounded} floats={view.floats_px}",
+            throttle_duration_sec=1.0,
+        )
+
+        if depth is not None and depth <= self.surface_depth:
+            self._finish_octagon(depth)
+            return
+
+        if self.time_in_state > self.octagon_ascend_timeout:
+            self._finish_octagon(depth, timed_out=True)
+
+    def _finish_octagon(self, depth, timed_out=False):
+        votes = self._octagon_reports
+        inside = sum(1 for v in votes if v)
+        verdict = (f"{inside}/{len(votes)} frames saw the ring surrounding"
+                   if votes else "ring never resolved")
+
+        self.octagon_done = True
+        self.get_logger().info(
+            f"*** SURFACED at {depth:.2f} m depth - {verdict} ***"
+            if depth is not None else f"*** SURFACED - {verdict} ***")
+        if timed_out:
+            self.get_logger().warn("Ascent timed out before reaching the surface.")
+
+        self._transition(State.SURFACED, "mission complete")
+
+    def _do_surfaced(self, dt):
+        """Hold station at the surface. Nothing further to do."""
+        self._publish(0.0, 0.0, 0.0, 0.0)
+        self.front_label = self.down_label = "[SURFACED] mission complete"
+
+    # ------------------------------------------------------------------
+    # Mission 4 - marker dropping
+    #
+    # Bins are chosen by inspection, not by remembered position: the
+    # vehicle has no horizontal odometry, so "fly to where the X bin was"
+    # is not a sentence it can act on. Instead it centres over whatever
+    # bin is underneath, reads the symbol, and either commits or steps
+    # over it and carries on down the path until the next one appears.
+
+    def _bin_view(self, dt, annotate=True):
+        """Shared per-tick bin sensing. Returns the bin underneath, or None."""
+        frame = self.down_frame.copy()
+        bins, _ = self.marker.detect(self.down_frame, self.z if self.z else self.cruise_z)
+
+        obs = bins[0] if bins else None
+        self.marker.update_speed(obs, self.z if self.z else self.cruise_z, dt)
+
+        if annotate and self.debug_view_enabled:
+            self.marker.annotate(frame, bins, self.target_symbol)
+
+        self.down_view = frame
+        self.front_label = f"[{self.state}] front camera idle"
+        return obs
+
+    def _do_bin_approach(self, dt):
+        obs = self._bin_view(dt)
+        heave = self._depth_command(dt)
+
+        if obs is None:
+            self.bin_lost += 1
+            self._publish(0.0, 0.0, 0.0, heave)
+            self.down_label = f"[{self.state}] bin lost {self.bin_lost}"
+
+            if self.bin_lost > self.bin_lost_frames_max:
+                # Count it as an attempt. Without this the vehicle drops
+                # back to the line, immediately re-triggers on the same
+                # bin, loses it again, and can ping-pong until the run
+                # ends - which looks from outside like it "hovers over the
+                # box then wanders off along the line".
+                self.bin_attempts += 1
+                self.line.reset()
+                self.bin_hits = 0
+
+                if self.bin_attempts >= self.max_bin_attempts:
+                    self.bins_done = True
+                    self.get_logger().warn(
+                        f"Giving up on the bins after {self.bin_attempts} "
+                        f"attempts; {self.markers_dropped} marker(s) dropped.")
+
+                self._transition(State.LINE_FOLLOW,
+                                 f"lost the bin (attempt {self.bin_attempts})")
+            return
+
+        self.bin_lost = 0
+        surge, sway, yaw, _ = self.marker.compute(obs, dt)
+        self._publish(surge, sway, yaw, heave)
+
+        err = math.hypot(obs.err_x_m, obs.err_y_m)
+        self.down_label = (
+            f"[{self.state}] {obs.symbol or '?'} err {err * 100:.0f} cm "
+            f"c={obs.circularity:.2f} v={self._speed_text()}"
+        )
+
+        # Commit needs BOTH centring and a classified symbol; without this
+        # a headless run cannot tell which of the two is holding it up.
+        self.get_logger().info(
+            f"BIN sym={obs.symbol or 'NONE'} circ={obs.circularity:.2f} "
+            f"hole={obs.has_hole} area={obs.area_px:.0f} "
+            f"track={obs.tracked_on} err={err*100:.0f}cm "
+            f"(need <{self.bin_descend_tolerance_m*100:.0f}) z={self.z:.2f}",
+            throttle_duration_sec=1.0,
+        )
+
+        # Commit only once centred AND classified, so the symbol is read
+        # from a frame where the bin is squarely underneath rather than
+        # skewed at the edge of the image.
+        if self.marker.centred(obs, self.bin_descend_tolerance_m) and obs.symbol:
+            if obs.symbol == self.target_symbol:
+                self._transition(State.BIN_DESCEND, f"{obs.symbol} is the target")
+            else:
+                self.rejected_symbols.add(obs.symbol)
+                self._transition(State.BIN_REJECT,
+                                 f"{obs.symbol} is not {self.target_symbol}")
+            return
+
+        if self.time_in_state > self.bin_approach_timeout:
+            self.line.reset()
+            self._transition(State.LINE_FOLLOW, "bin approach timed out")
+
+    def _do_bin_reject(self, dt):
+        """Step over the wrong bin and rejoin the path.
+
+        Straight surge for a fixed time, which is enough to clear the
+        1.0 m between the two bins, and the line follower picks the path
+        back up on the far side. The timer doubles as the cooldown that
+        stops the same bin re-triggering the approach immediately.
+        """
+        self._bin_view(dt)
+        heave = self._depth_command(dt)
+        self._publish(self.bin_reject_surge, 0.0, 0.0, heave)
+
+        self.down_label = (
+            f"[{self.state}] moving past, {self.time_in_state:.1f}"
+            f"/{self.bin_reject_duration:.1f}s"
+        )
+
+        if self.time_in_state > self.bin_reject_duration:
+            self.line.reset()
+            self.bin_hits = 0
+            self._transition(State.LINE_FOLLOW, "looking for the other bin")
+
+    def _do_bin_descend(self, dt):
+        obs = self._bin_view(dt)
+
+        self._set_depth_target(self.bin_drop_z)
+        heave = self._depth_command(dt)
+
+        if obs is None:
+            self.bin_lost += 1
+            self._publish(0.0, 0.0, 0.0, heave)
+            self.down_label = f"[{self.state}] bin lost {self.bin_lost}"
+            if self.bin_lost > self.bin_lost_frames_max:
+                self._abandon_bins("lost the bin while descending")
+            return
+
+        self.bin_lost = 0
+        surge, sway, yaw, _ = self.marker.compute(obs, dt)
+        self._publish(surge, sway, yaw, heave)
+
+        depth_err = abs(self.z - self.bin_drop_z) if self.z is not None else 9.9
+        err = math.hypot(obs.err_x_m, obs.err_y_m)
+        self.down_label = (
+            f"[{self.state}] z {self._z_text()} err {err * 100:.0f} cm"
+        )
+
+        if depth_err < 0.10 and self.marker.centred(obs, self.bin_centre_tolerance_m):
+            self.bin_hold_elapsed = 0.0
+            self._transition(State.BIN_HOLD, "at release altitude")
+
+    def _do_bin_hold(self, dt):
+        """Bleed off horizontal velocity before letting go.
+
+        Commanding zero is not the same as being stopped - the hull
+        coasts. The gate is the measured visual speed, taken from how fast
+        the bin slides across the down camera, which is the only ground
+        speed this vehicle can observe without a DVL.
+        """
+        obs = self._bin_view(dt)
+        heave = self._depth_command(dt)
+
+        if obs is None:
+            self.bin_lost += 1
+            self._publish(0.0, 0.0, 0.0, heave)
+            if self.bin_lost > self.bin_lost_frames_max:
+                self._abandon_bins("lost the bin while holding")
+            return
+
+        self.bin_lost = 0
+        self.bin_hold_elapsed += dt
+
+        # Keep trimming position, but gently - hard corrections here just
+        # put velocity back in.
+        surge, sway, yaw, _ = self.marker.compute(obs, dt)
+        self._publish(0.35 * surge, 0.35 * sway, yaw, heave)
+
+        speed = self.marker.speed_mps
+        err = math.hypot(obs.err_x_m, obs.err_y_m)
+        self.down_label = (
+            f"[{self.state}] v={self._speed_text()} err {err * 100:.0f} cm "
+            f"{self.bin_hold_elapsed:.1f}s"
+        )
+
+        settled = (speed is not None
+                   and speed < self.bin_hold_speed_mps
+                   and self.marker.centred(obs, self.bin_centre_tolerance_m)
+                   and self.bin_hold_elapsed > self.bin_hold_min_time)
+
+        if settled:
+            self._transition(State.BIN_DROP, f"stopped at {speed * 100:.1f} cm/s")
+            return
+
+        if self.bin_hold_elapsed > self.bin_hold_timeout:
+            # Release anyway rather than hover forever; log it so the miss
+            # is attributable.
+            self._transition(State.BIN_DROP, "hold timed out, releasing regardless")
+
+    def _do_bin_drop(self, dt):
+        obs = self._bin_view(dt)
+        heave = self._depth_command(dt)
+        self._publish(0.0, 0.0, 0.0, heave)
+
+        # Fire exactly once per entry into this state, tracked by an
+        # explicit flag rather than inferred from the clock.
+        #
+        # This used to test `time_in_state <= dt`, which is a one-frame
+        # window that only holds if the tick's dt happens to be the same
+        # value time_in_state was incremented by. dt comes from the wall
+        # clock and jitters, so the window could close before the handler
+        # ever saw it: measured runs entered BIN_DROP, dwelt there for 40
+        # ticks, and released nothing - the vehicle then hovered over the
+        # bin and eventually wandered off along the line, which is the
+        # reported symptom.
+        if not self._drop_fired:
+            self._drop_fired = True
+            self.drop_pub.publish(EmptyMsg())
+            self.markers_dropped += 1
+
+            err = math.hypot(obs.err_x_m, obs.err_y_m) if obs else float('nan')
+            speed = self.marker.speed_mps if self.marker.speed_mps is not None else float('nan')
+            entry = {
+                "marker": self.markers_dropped,
+                "centre_err_m": err,
+                "speed_mps": speed,
+                "true_xy": None,
+            }
+            if self.true_z is not None and self.true_xy is not None:
+                entry["true_xy"] = self.true_xy
+            self.drop_log.append(entry)
+
+            self.get_logger().info(
+                f"*** MARKER {self.markers_dropped}/{self.markers_carried} RELEASED "
+                f"- centre error {err * 100:.1f} cm, ground speed {speed * 100:.1f} cm/s ***"
+            )
+
+        self.down_label = f"[{self.state}] released {self.markers_dropped}"
+
+        if self.time_in_state > self.bin_drop_settle:
+            if self.markers_dropped >= self.markers_carried:
+                self._transition(State.BIN_DONE, "all markers away")
+            else:
+                self.bin_hold_elapsed = 0.0
+                self._transition(State.BIN_HOLD, "re-centring for the next marker")
+
+    def _do_bin_done(self, dt):
+        self._bin_view(dt, annotate=False)
+
+        self._set_depth_target(self.cruise_z)
+        heave = self._depth_command(dt)
+
+        # Creep forward while climbing rather than hovering in place. The
+        # bin sits on top of the line, so holding station here leaves the
+        # down camera staring at navy with no path to re-acquire.
+        self._publish(self.bin_exit_surge, 0.0, 0.0, heave)
+
+        self.down_label = f"[{self.state}] climbing back to cruise"
+
+        if self.z is not None and abs(self.z - self.cruise_z) < 0.15:
+            self.bins_done = True
+            self.line.reset()
+            self._log_drop_summary()
+            self._transition(State.LINE_FOLLOW, "mission 4 complete")
+
+    def _abandon_bins(self, reason):
+        self.bins_done = True
+        self._set_depth_target(self.cruise_z)
+        self.line.reset()
+        self.get_logger().warn(f"Giving up on the bins: {reason}")
+        self._log_drop_summary()
+        self._transition(State.LINE_FOLLOW, reason)
+
+    def _log_drop_summary(self):
+        if not self.drop_log:
+            self.get_logger().info("No markers were released.")
+            return
+        for d in self.drop_log:
+            self.get_logger().info(
+                f"  marker {d['marker']}: centre error {d['centre_err_m'] * 100:.1f} cm, "
+                f"release speed {d['speed_mps'] * 100:.1f} cm/s"
+            )
+
+    def _speed_text(self):
+        s = self.marker.speed_mps
+        return "n/a" if s is None else f"{s * 100:.1f}cm/s"
 
     # ------------------------------------------------------------------
 
     def _abandon_buoy(self, reason):
         self.buoy_attempts += 1
+
+        # Blacklist the colour that just failed so the next attempt goes
+        # after a different flower rather than retrying the one that is
+        # not working.
+        if self.buoy_target_color:
+            self.buoys_touched.add(self.buoy_target_color)
+            self.get_logger().warn(
+                f"Skipping {self.buoy_target_color} buoy: {reason}")
+
         self.buoy.unlock()
         self.buoy_target_color = None
+        self.buoy_hits = 0
 
-        if self.buoy_attempts >= self.max_buoy_attempts:
+        if (self.buoy_attempts >= self.max_buoy_attempts
+                or len(self.buoys_touched) >= self.buoys_to_touch):
             self.buoy_done = True
-            self.get_logger().warn(f"Giving up on the buoy after {self.buoy_attempts} attempts.")
+            self.get_logger().warn(
+                f"Ending mission 2 after {self.buoy_attempts} failed attempts.")
 
         self.line.reset()
         self.depth.reset()

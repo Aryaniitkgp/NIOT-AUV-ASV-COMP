@@ -157,12 +157,49 @@ class BuoyServoController:
         self.dist_coeffs = None
         self.camera_matrix = None
 
-        # Detection gates
+        # Detection gates.
+        #
+        # Two arena objects share the flowers' exact material colours and
+        # will otherwise be detected as buoys:
+        #
+        #   cupid_red plate   0.85 0.1 0.1  - identical to flower_red
+        #   octagon floats x8 0.95 0.85 0.1 - identical to flower_yellow
+        #
+        # Colour alone cannot separate them, so shape and elevation do it.
+        #
+        # Circularity: a sphere fills its enclosing circle (~1.0). The
+        # cupid target is a 0.61 m FLAT SQUARE - a square inscribed in its
+        # own enclosing circle only reaches 2/pi ~ 0.64 - so raising the
+        # floor above that rejects it on geometry, at any range.
         self.min_area_px = 350.0
         self.min_radius_px = 11.0
-        self.min_circularity = 0.62
-        self.max_aspect_ratio = 1.6
+        self.min_circularity = 0.72
+        self.max_aspect_ratio = 1.35
         self.kernel = np.ones((5, 5), np.uint8)
+
+        # Elevation gate. The octagon floats sit at z = 2.50 (the free
+        # surface) while the vehicle cruises well below them, so they
+        # project into the TOP of the frame. The flowers sit at z = 1.00,
+        # near the optical axis.
+        #
+        # 0.42 was too tight. It assumed the vehicle is at its 1.00 cruise
+        # depth, but the dive routinely overshoots to z ~ 0.77 - and from
+        # 0.23 m lower the buoy sits ABOVE the camera, drifting up the
+        # frame as the vehicle closes. A real run lost the red flower
+        # between 2.85 m and 2.46 m for exactly this reason and then drove
+        # into it.
+        #
+        # 0.22 still rejects the floats, which sit 1.2-1.5 m above the
+        # vehicle and project far higher than any flower can, while
+        # tolerating a quarter-metre of depth error.
+        self.max_elevation_frac = 0.22
+
+        # Range sanity bounds. Deliberately wide - this is a plausibility
+        # check, not the primary discriminator. The three flowers are
+        # 2.46 m apart from each other, so a tight gate (e.g. 1.0-1.5 m)
+        # would reject the real targets along with the false ones.
+        self.min_valid_distance = 0.25
+        self.max_valid_distance = 4.0
 
         # IBVS gains. Yaw carries the alignment, sway only trims: with a
         # single forward camera the pixel error is an angle, so yaw is the
@@ -191,6 +228,11 @@ class BuoyServoController:
 
         # Do not drive forward while badly pointed at the target.
         self.align_tolerance = 0.22
+        # Never let the surge gate reach zero, or a badly-placed target
+        # locks the vehicle into turning on the spot indefinitely.
+        self.min_align_surge_scale = 0.25
+        # Forward creep while sweeping for a lost target.
+        self.search_surge = 1.2
 
         # Touch geometry. The camera sits 0.2 m ahead of the body origin,
         # essentially on the front face, so closing to here and then
@@ -282,6 +324,16 @@ class BuoyServoController:
             if aspect > self.max_aspect_ratio:
                 continue
 
+            # Elevation gate: the octagon floats live at the free surface
+            # and can only ever appear high in the frame. The flowers sit
+            # at the vehicle's own working depth.
+            if cy < self.max_elevation_frac * height:
+                continue
+
+            distance = self.buoy_radius_m * self.focal_px / radius
+            if not (self.min_valid_distance <= distance <= self.max_valid_distance):
+                continue
+
             # Straighten the centroid before measuring against the
             # principal point. Under a flat port the distortion grows with
             # radius, so a buoy out near the frame edge - exactly where the
@@ -293,7 +345,7 @@ class BuoyServoController:
                 u=cx, v=cy, radius_px=radius, area_px=area,
                 circularity=circularity,
                 ex=(uu - u0) / u0, ey=(vv - v0) / v0,
-                distance=self.buoy_radius_m * self.focal_px / radius,
+                distance=distance,
                 color=color,
             ))
 
@@ -362,17 +414,36 @@ class BuoyServoController:
         surge_cmd = self.k_surge / max(obs.radius_px, 1.0)
         surge_cmd = max(self.min_approach_surge, min(self.max_approach_surge, surge_cmd))
 
-        misalignment = math.hypot(obs.ex, obs.ey)
+        # Gate surge on HORIZONTAL alignment only.
+        #
+        # Including e_y here deadlocks the approach: vertical error is the
+        # depth loop's job, not surge's, but a buoy sitting low or high in
+        # frame keeps the combined error above the cutoff forever. Yaw is
+        # ungated, so the vehicle spins on the spot with surge pinned at
+        # zero and never closes - which is exactly the observed failure.
+        #
+        # The floor keeps a little way on so the vehicle always creeps
+        # forward while turning, rather than stalling completely.
+        misalignment = abs(obs.ex)
         if misalignment > self.align_tolerance:
-            scale = max(0.0, 1.0 - (misalignment - self.align_tolerance) / 0.4)
-            surge_cmd *= scale
+            scale = 1.0 - (misalignment - self.align_tolerance) / 0.5
+            surge_cmd *= max(self.min_align_surge_scale, scale)
 
         return surge_cmd, sway_cmd, yaw_cmd, heave_rate
 
     def search(self):
-        """Sweep back toward the side the buoy was last seen on."""
+        """Sweep back toward the side the buoy was last seen on.
+
+        Keeps a little forward way on. Commanding zero surge here means a
+        target that was simply lost to range can never be recovered - the
+        vehicle pirouettes on the spot while the buoy stays too far away
+        to detect. A slow creep closes that gap while the sweep hunts.
+        """
         direction = 1.0 if self.last_ex >= 0.0 else -1.0
-        return 0.0, -direction * 0.3 * self.max_sway, -direction * 0.5 * self.max_yaw, 0.0
+        return (self.search_surge,
+                -direction * 0.3 * self.max_sway,
+                -direction * 0.5 * self.max_yaw,
+                0.0)
 
     def annotate(self, frame, obs, candidates=()):
         height, width = frame.shape[:2]

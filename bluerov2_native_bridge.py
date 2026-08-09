@@ -19,6 +19,10 @@ from gz.msgs10.model_pb2 import Model as GzModel
 from gz.msgs10.clock_pb2 import Clock as GzClock
 from gz.msgs10.double_pb2 import Double as GzDouble
 from gz.msgs10.pose_v_pb2 import Pose_V as GzPoseV
+from gz.msgs10.entity_factory_pb2 import EntityFactory as GzEntityFactory
+from gz.msgs10.boolean_pb2 import Boolean as GzBoolean
+
+from std_msgs.msg import Empty as EmptyMsg
 
 import time
 import random
@@ -208,6 +212,21 @@ class BlueROV2NativeBridge(Node):
             f'@ {rate_hz:.0f} Hz'
         )
 
+        # 3c. Marker dropper.
+        #
+        # The vehicle carries no modelled payload, so a "drop" spawns a
+        # marker into the world at the vehicle's current position and lets
+        # it fall on its own. Denser than water and small, so it sinks
+        # quickly and roughly straight down - which is exactly why the
+        # mission has to come to a stop before releasing, or the marker
+        # keeps the vehicle's horizontal velocity and lands downrange.
+        self.declare_parameter('marker_mass', 0.25)
+        self.declare_parameter('marker_radius', 0.03)
+
+        self._marker_count = 0
+        self.create_subscription(
+            EmptyMsg, '/bluerov2/drop_marker', self._drop_marker_cb, 10)
+
         # 4. Thruster Commands (ROS -> Gazebo, one Float64 topic per thruster)
         self.thruster_pubs_gz = {}
         self.thruster_subs_ros = []
@@ -371,6 +390,68 @@ class BlueROV2NativeBridge(Node):
             self.pub_depth.publish(Float64(data=float(measured_depth_m)))
         except Exception as e:
             self.get_logger().error(f'Depth bridge error: {str(e)}')
+
+    def _drop_marker_cb(self, _msg):
+        """Spawn a marker at the vehicle and let physics take it down."""
+        if self._last_pose_position is None:
+            self.get_logger().warn('Drop requested but vehicle pose is unknown.')
+            return
+
+        x, y, z = self._last_pose_position
+        z -= 0.15                       # clear of the hull before it falls
+
+        mass = float(self.get_parameter('marker_mass').value)
+        radius = float(self.get_parameter('marker_radius').value)
+
+        # Inertia of a solid sphere, so the spawn is not rejected for
+        # having a degenerate inertial.
+        i = 0.4 * mass * radius * radius
+
+        self._marker_count += 1
+        name = f'marker_{self._marker_count}'
+
+        sdf = f"""<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="{name}">
+    <pose>{x} {y} {z} 0 0 0</pose>
+    <link name="body">
+      <inertial>
+        <mass>{mass}</mass>
+        <inertia><ixx>{i}</ixx><iyy>{i}</iyy><izz>{i}</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+      </inertial>
+      <collision name="col">
+        <geometry><sphere><radius>{radius}</radius></sphere></geometry>
+      </collision>
+      <visual name="vis">
+        <geometry><sphere><radius>{radius}</radius></sphere></geometry>
+        <material>
+          <ambient>1.0 0.2 0.6 1.0</ambient>
+          <diffuse>1.0 0.2 0.6 1.0</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>"""
+
+        try:
+            req = GzEntityFactory()
+            req.sdf = sdf
+            req.name = name
+            req.allow_renaming = True
+
+            ok, result = self.gz_node.request(
+                '/world/save_arena/create', req, GzEntityFactory, GzBoolean, 2000)
+
+            if ok and result.data:
+                self.get_logger().info(
+                    f'Dropped {name} at ({x:.2f}, {y:.2f}, {z:.2f})')
+            else:
+                self.get_logger().warn(f'Spawn of {name} was refused by Gazebo.')
+        except Exception as e:
+            # The mission still scores the drop from its own estimate, so
+            # a failed spawn costs the visual only.
+            self.get_logger().error(f'Marker spawn failed: {e}')
 
     def _pose_cb(self, gz_pose_v):
         try:

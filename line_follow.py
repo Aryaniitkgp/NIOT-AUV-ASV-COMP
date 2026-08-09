@@ -17,7 +17,8 @@ class LineResult:
     """What one frame of line following produced."""
 
     def __init__(self, found, surge, sway, yaw, label,
-                 lateral_error=0.0, heading_error=0.0, mask=None):
+                 lateral_error=0.0, heading_error=0.0, mask=None,
+                 at_fork=False, branches=1):
         self.found = found
         self.surge = surge
         self.sway = sway
@@ -26,6 +27,8 @@ class LineResult:
         self.lateral_error = lateral_error
         self.heading_error = heading_error
         self.mask = mask
+        self.at_fork = at_fork        # path is splitting this frame
+        self.branches = branches      # how many legs were resolved
 
 
 class LineFollowController:
@@ -76,6 +79,17 @@ class LineFollowController:
         self.prev_lateral_error = 0.0
         self.prev_heading_error = 0.0
 
+        # Which way to go where the path splits: "port", "starboard", or
+        # None to take whichever leg happens to dominate (the old, and
+        # effectively random, behaviour).
+        #
+        # The course forks at (-3, 0) into two symmetric 45 degree legs.
+        # In the down camera image right is vehicle starboard, and the
+        # bins sit at negative y, which is starboard. So "starboard" is
+        # the marker-dropping route and "port" is the torpedo route.
+        self.branch_preference = None
+        self.fork_frames = 0
+
         self.kernel = np.ones((5, 5), np.uint8)
 
         # Robust HSV Range for Submerged Orange
@@ -83,6 +97,10 @@ class LineFollowController:
         self.upper_orange = np.array([22, 255, 255])
 
         self.lookahead_pixels = 70
+        # Fork detection looks further up the frame than steering does.
+        # At the split itself the legs still overlap; they only resolve
+        # into separate clusters about 100 px ahead of the junction.
+        self.fork_lookahead_pixels = 130
         self.band_half_height = 20
         self.lost_threshold = 3
         self.search_timeout = 12.0
@@ -90,12 +108,17 @@ class LineFollowController:
         self.min_surge_scale = 0.35
 
     def reset(self):
-        """Clear the tracking memory when the FSM hands control back."""
+        """Clear the tracking memory when the FSM hands control back.
+
+        branch_preference is deliberately NOT cleared - it is a mission
+        decision owned by the sequencer, not per-frame tracking state.
+        """
         self.lost_frames = 0
         self.search_elapsed = 0.0
         self.searching = False
         self.prev_lateral_error = 0.0
         self.prev_heading_error = 0.0
+        self.fork_frames = 0
 
     def _clamp(self, value, limit):
         return max(-limit, min(limit, value))
@@ -122,6 +145,37 @@ class LineFollowController:
             return None
 
         return float(xs.mean())
+
+    def _band_clusters(self, line_mask, row, half_height, gap_px=25):
+        """Separate runs of line pixels in a strip, as (centre, width).
+
+        The mean returned by _band_centroid is meaningless where the path
+        splits: two legs either side of centre average to the empty gap
+        between them, and the vehicle drives straight into it. Splitting
+        the row into contiguous clusters is what makes a fork visible as
+        a fork rather than as one wide, badly-centred line.
+        """
+        height = line_mask.shape[0]
+        top = max(0, int(row) - half_height)
+        bottom = min(height, int(row) + half_height + 1)
+        if bottom <= top:
+            return []
+
+        cols = np.nonzero(line_mask[top:bottom].any(axis=0))[0]
+        if cols.size == 0:
+            return []
+
+        clusters = []
+        start = prev = cols[0]
+        for c in cols[1:]:
+            if c - prev > gap_px:
+                clusters.append((float(start + prev) / 2.0, float(prev - start + 1)))
+                start = c
+            prev = c
+        clusters.append((float(start + prev) / 2.0, float(prev - start + 1)))
+
+        # Ignore slivers - specular glints and mask noise.
+        return [(c, w) for c, w in clusters if w >= 12.0]
 
     def update(self, frame, dt, draw=True):
         """Run one frame. Overlays are drawn onto `frame` in place."""
@@ -154,6 +208,29 @@ class LineFollowController:
 
         if near_x is None and far_x is None:
             return self._handle_lost_line(frame, mask, dt, "Insufficient pixels", draw)
+
+        # Fork handling.
+        #
+        # Cluster a band FURTHER ahead than the steering lookahead. Right
+        # at the split the two legs are still touching, so they merge into
+        # one wide cluster and the fork is invisible; they only separate
+        # some way up the image. Detecting late is also steering late, so
+        # this looks as far ahead as the frame allows.
+        fork_row = max(self.band_half_height,
+                       center_y - self.fork_lookahead_pixels)
+        far_clusters = self._band_clusters(
+            line_only_mask, fork_row, self.band_half_height)
+        at_fork = len(far_clusters) >= 2
+
+        if at_fork and self.branch_preference is not None:
+            # Image right is vehicle starboard, so "port" is the smaller x.
+            far_clusters.sort(key=lambda c: c[0])
+            chosen = (far_clusters[0] if self.branch_preference == "port"
+                      else far_clusters[-1])
+            far_x = chosen[0]
+            self.fork_frames += 1
+        else:
+            self.fork_frames = 0
 
         # Steer on the lookahead point when it exists, otherwise fall back
         # to what is directly underneath.
@@ -214,6 +291,8 @@ class LineFollowController:
         state = "ON LINE" if abs(lateral_error) < 0.15 and abs(heading_error) < 0.25 else "ALIGNING"
         if not heading_valid:
             state += " (NO HDG)"
+        if at_fork:
+            state = f"FORK x{len(far_clusters)} -> {self.branch_preference or 'drift'}"
 
         if draw:
             target_on_line = False
@@ -234,7 +313,8 @@ class LineFollowController:
         )
 
         return LineResult(True, surge_cmd, sway_cmd, yaw_cmd, label,
-                          lateral_error, heading_error, mask)
+                          lateral_error, heading_error, mask,
+                          at_fork=at_fork, branches=len(far_clusters))
 
     def _handle_lost_line(self, frame, mask, dt, reason, draw):
         self.lost_frames += 1
