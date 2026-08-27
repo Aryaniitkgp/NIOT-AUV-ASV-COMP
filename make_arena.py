@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""Generate save_arena.sdf from the measured competition layout.
+
+Rebuilt from a photograph of a previous year's arena. The critical
+correction over the earlier version is that **the orange path is
+discontinuous**: it appears as isolated segments near each task, not as a
+continuous line joining them.
+
+That single fact invalidates any autonomy design that assumes it can
+follow a line from start to finish. The vehicle must cross unmarked
+water between tasks.
+
+Layout, derived from the dimensions annotated on the photograph
+(world frame: +X is course direction, +Y is port/left, Z up, floor z=0,
+free surface z=2.5):
+
+                      LEFT OCTAGON        RIGHT OCTAGON
+                       (8.5,+4.24)         (8.5,-4.24)
+                            |                   |
+                          [seg]               [seg]
+                            |                   |
+                        BINS O/X            CUPID (torpedo)
+                      (4.24,+4.24)         (4.24,-4.24)
+                             \                 /
+                            [seg]           [seg]
+                               \             /
+                                \   6 m    /
+                                 L-BAR (0,0)
+                                     |
+                                   4 m
+                                     |
+                    GREEN (-4.02,+2.25)  YELLOW (-4.02,-2.25)
+                                  \     /
+                                 3m \  / 3m
+                                  RED (-6,0)
+                                     |
+                                   [seg]
+                                     |
+                                START (-11,0)
+
+Segment placement (the six orange patches):
+  1. between start and the red flower
+  2. between the flower cluster and the L-bar
+  3. on the left branch, before the bins
+  4. after the bins, toward the left octagon
+  5. on the right branch, before cupid
+  6. after cupid, toward the right octagon
+
+Note segments 3/4 and 5/6: one before the task, one after — matching the
+observation that a path lies "in back of bins and one ahead".
+"""
+
+import math
+
+OUT = 'save_arena.sdf'
+
+# ---------------------------------------------------------------- layout
+START = (-11.0, 0.0)
+RED = (-6.0, 0.0)
+
+_DY = 4.5 / 2.0                                   # flowers 4.5 m apart
+_DX = math.sqrt(3.0 ** 2 - _DY ** 2)              # and 3 m from red
+GREEN = (RED[0] + _DX, +_DY)
+YELLOW = (RED[0] + _DX, -_DY)
+
+BAR = (0.0, 0.0)                                  # 4 m beyond the flowers
+_BR = 6.0 / math.sqrt(2.0)                        # branches: 6 m at 45 deg
+BINS = (_BR, +_BR)
+CUPID = (_BR, -_BR)
+OCT_L = (8.5, +_BR)
+OCT_R = (8.5, -_BR)
+
+FLOWER_R = 0.1145
+FLOWER_Z = 1.00
+BAR_Z = 0.50                                      # crossbar height
+SURFACE_Z = 2.5
+
+ORANGE = '1.0 0.45 0.0'
+GREY_BASE = '0.28 0.28 0.3'
+GREY_PIPE = '0.6 0.6 0.62'
+NAVY = '0.12 0.18 0.45'
+WHITE = '0.95 0.95 0.95'
+BLUE_RING = '0.1 0.2 0.8'
+YELLOW_FLOAT = '0.95 0.85 0.1'
+BAR_BLUE = '0.05 0.1 0.9'
+
+
+def mat(rgb):
+    return (f'        <material>\n'
+            f'          <ambient>{rgb} 1.0</ambient>\n'
+            f'          <diffuse>{rgb} 1.0</diffuse>\n'
+            f'          <specular>0.1 0.1 0.1 1</specular>\n'
+            f'        </material>\n')
+
+
+def box(name, pose, size, rgb, collision=True):
+    g = f'<geometry><box><size>{size}</size></box></geometry>'
+    s = f'    <link name="{name}">\n      <pose>{pose}</pose>\n'
+    if collision:
+        s += f'      <collision name="{name}_col">\n        {g}\n      </collision>\n'
+    s += f'      <visual name="{name}_vis">\n        {g}\n' + mat(rgb) + '      </visual>\n'
+    return s + '    </link>\n'
+
+
+def cyl(name, pose, radius, length, rgb, collision=True):
+    g = (f'<geometry><cylinder><radius>{radius}</radius>'
+         f'<length>{length}</length></cylinder></geometry>')
+    s = f'    <link name="{name}">\n      <pose>{pose}</pose>\n'
+    if collision:
+        s += f'      <collision name="{name}_col">\n        {g}\n      </collision>\n'
+    s += f'      <visual name="{name}_vis">\n        {g}\n' + mat(rgb) + '      </visual>\n'
+    return s + '    </link>\n'
+
+
+def sphere(name, pose, radius, rgb, collision=True):
+    g = f'<geometry><sphere><radius>{radius}</radius></sphere></geometry>'
+    s = f'    <link name="{name}">\n      <pose>{pose}</pose>\n'
+    if collision:
+        s += f'      <collision name="{name}_col">\n        {g}\n      </collision>\n'
+    s += f'      <visual name="{name}_vis">\n        {g}\n' + mat(rgb) + '      </visual>\n'
+    return s + '    </link>\n'
+
+
+def p(x, y, z, yaw=0.0):
+    return f'{x:.4f} {y:.4f} {z:.4f} 0 0 {yaw:.4f}'
+
+
+# ------------------------------------------------------------------ build
+out = []
+A = out.append
+
+A('''<?xml version="1.0" ?>
+<!--
+  NIOT SAVe competition arena.  GENERATED BY make_arena.py - edit that,
+  not this file.
+
+  Tank 25 x 20 m, water 0..2.5 m.  Course runs along +X.
+
+  The orange path is DISCONTINUOUS: six isolated segments placed near the
+  tasks, not a continuous line.  The vehicle must cross unmarked water
+  between them.
+-->
+<sdf version="1.7">
+  <world name="save_arena">
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
+
+    <!-- Graded buoyancy: water below z=2.5, air above, so the vehicle
+         regains weight at the surface instead of floating into the sky. -->
+    <plugin filename="gz-sim-buoyancy-system" name="gz::sim::systems::Buoyancy">
+      <graded_buoyancy>
+        <default_density>1000</default_density>
+        <density_change>
+          <above_depth>2.5</above_depth>
+          <density>1</density>
+        </density_change>
+      </graded_buoyancy>
+      <enable>bluerov2</enable>
+    </plugin>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.3 0.55 0.75 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.3 -0.9</direction>
+    </light>
+''')
+
+# ------------------------------------------------------------------- pool
+A('  <model name="pool">\n    <static>true</static>\n')
+A(box('floor', p(0, 0, -0.1), '25.0 20.0 0.2', GREY_PIPE))
+A(box('wall_xp', p(12.6, 0, 1.4), '0.2 20.4 2.8', GREY_PIPE))
+A(box('wall_xn', p(-12.6, 0, 1.4), '0.2 20.4 2.8', GREY_PIPE))
+A(box('wall_yp', p(0, 10.1, 1.4), '25.0 0.2 2.8', GREY_PIPE))
+A(box('wall_yn', p(0, -10.1, 1.4), '25.0 0.2 2.8', GREY_PIPE))
+A('  </model>\n')
+
+A('''  <model name="water">
+    <static>true</static>
+    <link name="water_vol">
+      <pose>0 0 1.25 0 0 0</pose>
+      <visual name="water_vol_vis">
+        <geometry><box><size>25.0 20.0 2.5</size></box></geometry>
+        <material>
+          <ambient>0.2 0.45 0.75 0.3</ambient>
+          <diffuse>0.2 0.45 0.75 0.3</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+''')
+
+# ------------------------------------------------------- orange path (6)
+# Painted on the floor: visual only, no collision.
+A('''  <!-- ORANGE PATH - SIX DISCONTINUOUS SEGMENTS.
+       Each is a short marker near a task, NOT a connected route.  The
+       gaps between them are unmarked water the vehicle must cross with
+       no line to follow. -->
+  <model name="orange_path">
+    <static>true</static>
+''')
+
+SEG_LEN, SEG_W = 2.0, 0.15
+
+
+def seg(name, cx, cy, yaw):
+    return box(name, p(cx, cy, 0.03, yaw), f'{SEG_LEN} {SEG_W} 0.02',
+               ORANGE, collision=False)
+
+
+A(seg('seg1_start', (START[0] + RED[0]) / 2, 0.0, 0.0))
+A(seg('seg2_to_bar', (GREEN[0] + BAR[0]) / 2, 0.0, 0.0))
+A(seg('seg3_left_pre', BINS[0] / 2, BINS[1] / 2, math.pi / 4))
+A(seg('seg4_left_post', (BINS[0] + OCT_L[0]) / 2, BINS[1], 0.0))
+A(seg('seg5_right_pre', CUPID[0] / 2, CUPID[1] / 2, -math.pi / 4))
+A(seg('seg6_right_post', (CUPID[0] + OCT_R[0]) / 2, CUPID[1], 0.0))
+A('  </model>\n')
+
+# ------------------------------------------------------------ start buoy
+A('  <model name="start_buoy">\n    <static>true</static>\n')
+A(cyl('start_base', p(*START, 0.02), 0.1, 0.04, GREY_BASE))
+A(cyl('start_pipe', p(*START, 0.30), 0.03, 0.6, GREY_PIPE))
+A(sphere('start_ball', p(*START, 0.70), 0.2, '0.1 0.2 0.8'))
+A('  </model>\n')
+
+# --------------------------------------------------------------- flowers
+A('''  <!-- FLOWERS.  Red on the centreline; green to port and yellow to
+       starboard, 4.5 m apart and 3 m from red. -->
+  <model name="flowers">
+    <static>true</static>
+''')
+for tag, (fx, fy), rgb in (('r', RED, '0.85 0.1 0.1'),
+                           ('g', GREEN, '0.1 0.7 0.15'),
+                           ('y', YELLOW, '0.95 0.85 0.1')):
+    A(cyl(f'flower_{tag}_base', p(fx, fy, 0.02), 0.1, 0.04, GREY_BASE))
+    A(cyl(f'flower_{tag}_pipe', p(fx, fy, 0.45), 0.03, 0.9, GREY_PIPE))
+    A(sphere(f'flower_{tag}_ball', p(fx, fy, FLOWER_Z), FLOWER_R, rgb))
+A('  </model>\n')
+
+# ----------------------------------------------------------------- L-bar
+# Upright L in the y-z plane: horizontal crossbar spanning the lane at
+# z=0.5, vertical rod rising from its port end.
+A('''  <!-- L-BAR.  Upright, crossing the lane at x=0.  The horizontal
+       crossbar at z=0.5 is what the vehicle passes over; the vertical rod
+       rises from its port end so the shape reads as an "L" from the
+       approaching front camera. -->
+  <model name="love_lane">
+    <static>true</static>
+''')
+BAR_HALF = 0.9
+A(cyl('ll_a_base', p(BAR[0], BAR[1] - BAR_HALF, 0.02), 0.1, 0.04, GREY_BASE))
+A(cyl('ll_a_pipe', p(BAR[0], BAR[1] - BAR_HALF, 0.25), 0.03, 0.5, GREY_PIPE))
+A(cyl('ll_b_base', p(BAR[0], BAR[1] + BAR_HALF, 0.02), 0.1, 0.04, GREY_BASE))
+A(cyl('ll_b_pipe', p(BAR[0], BAR[1] + BAR_HALF, 0.25), 0.03, 0.5, GREY_PIPE))
+# crossbar: cylinder axis is local z, so roll 90 deg puts it along Y
+A('    <link name="ll_long">\n'
+  f'      <pose>{BAR[0]:.4f} {BAR[1]:.4f} {BAR_Z:.4f} 1.5708 0 0</pose>\n'
+  '      <collision name="ll_long_col">\n'
+  f'        <geometry><cylinder><radius>0.03</radius><length>{2*BAR_HALF}</length></cylinder></geometry>\n'
+  '      </collision>\n'
+  '      <visual name="ll_long_vis">\n'
+  f'        <geometry><cylinder><radius>0.03</radius><length>{2*BAR_HALF}</length></cylinder></geometry>\n'
+  + mat(BAR_BLUE) + '      </visual>\n    </link>\n')
+A(cyl('ll_short', p(BAR[0], BAR[1] + BAR_HALF, BAR_Z + 0.6), 0.03, 1.2, BAR_BLUE))
+A('  </model>\n')
+
+# ------------------------------------------------------------------ bins
+# Two bins side by side across the branch, symbols painted on the floor.
+A('''  <!-- BINS.  Two open boxes side by side on the left branch.  The
+       white floor symbols are what distinguishes them: a ring ("O") and a
+       cross ("X").  Two independent cues separate them - circularity and
+       whether the contour encloses a hole. -->
+  <model name="bins">
+    <static>true</static>
+''')
+for tag, byoff in (('O', +0.5), ('X', -0.5)):
+    bx, by = BINS[0], BINS[1] + byoff
+    A(box(f'bin_{tag}_base', p(bx, by, 0.01), '0.64 0.64 0.02', NAVY))
+    A(box(f'bin_{tag}_wN', p(bx, by + 0.31, 0.15), '0.64 0.02 0.3', NAVY))
+    A(box(f'bin_{tag}_wS', p(bx, by - 0.31, 0.15), '0.64 0.02 0.3', NAVY))
+    A(box(f'bin_{tag}_wE', p(bx + 0.31, by, 0.15), '0.02 0.6 0.3', NAVY))
+    A(box(f'bin_{tag}_wW', p(bx - 0.31, by, 0.15), '0.02 0.6 0.3', NAVY))
+    if tag == 'O':
+        # white disc with a navy plug on top -> renders as a ring, so its
+        # contour has a child.  That topology is the second cue.
+        A(cyl('bin_O_mark', p(bx, by, 0.027), 0.20, 0.014, WHITE, collision=False))
+        A(cyl('bin_O_hole', p(bx, by, 0.033), 0.115, 0.006, NAVY, collision=False))
+    else:
+        A(box('bin_X_barA', p(bx, by, 0.027, 0.7854), '0.44 0.075 0.014', WHITE, collision=False))
+        A(box('bin_X_barB', p(bx, by, 0.027, -0.7854), '0.44 0.075 0.014', WHITE, collision=False))
+A('  </model>\n')
+
+# ----------------------------------------------------------------- cupid
+# Two plates with heart cut-outs, facing back along the approach.
+A('''  <!-- CUPID (torpedo target).  Two plates carrying a real
+       heart-shaped hole, generated as a mesh because SDF cannot subtract
+       one shape from another.  The mesh is VISUAL ONLY - dartsim cannot
+       build collision from a mesh - so collision is a four-box frame
+       around the hole's bounding box. -->
+  <model name="cupid">
+    <static>true</static>
+''')
+A(cyl('cupid_p_base', p(*CUPID, 0.02), 0.1, 0.04, GREY_BASE))
+A(cyl('cupid_p_pipe', p(*CUPID, 0.50), 0.03, 1.0, GREY_PIPE))
+
+PLATE_YAW = math.pi / 4          # normal points back toward the L-bar
+_off = 0.35 / math.sqrt(2.0)
+MESH = 'model://heart_target/meshes/heart_plate.obj'
+for tag, sgn, rgb in (('red', -1.0, '0.85 0.1 0.1'), ('green', +1.0, '0.1 0.7 0.15')):
+    px_, py_ = CUPID[0] + sgn * _off, CUPID[1] + sgn * _off
+    A(f'    <link name="cupid_{tag}">\n'
+      f'      <pose>{px_:.4f} {py_:.4f} 1.3000 0 0 {PLATE_YAW:.4f}</pose>\n')
+    for cn, cp, cs in (('l', '-0.2375 0 0', '0.135 0.02 0.61'),
+                       ('r', '0.2375 0 0', '0.135 0.02 0.61'),
+                       ('t', '0 0 0.22925', '0.34 0.02 0.1515'),
+                       ('b', '0 0 -0.22925', '0.34 0.02 0.1515')):
+        A(f'      <collision name="cupid_{tag}_{cn}"><pose>{cp} 0 0 0</pose>\n'
+          f'        <geometry><box><size>{cs}</size></box></geometry></collision>\n')
+    A(f'      <visual name="cupid_{tag}_vis">\n'
+      f'        <geometry><mesh><uri>{MESH}</uri></mesh></geometry>\n'
+      + mat(rgb) + '      </visual>\n    </link>\n')
+A('  </model>\n')
+
+# -------------------------------------------------------------- octagons
+# Floating rings AT the free surface, with yellow marker floats.
+A('''  <!-- OCTAGONS.  Floating rings at the free surface (z=2.5), one at
+       the end of each branch.  Blue bars with yellow marker floats at
+       alternate vertices. -->
+''')
+APOTHEM, SIDE = 3.26, 2.7
+for label, (ox, oy) in (('L', OCT_L), ('R', OCT_R)):
+    A(f'  <model name="octagon_{"left" if label == "L" else "right"}">\n    <static>true</static>\n')
+    for i in range(8):
+        ang = math.pi / 4 * i
+        sx = ox + APOTHEM * math.cos(ang)
+        sy = oy + APOTHEM * math.sin(ang)
+        A('    <link name="oct%s_seg%d">\n'
+          '      <pose>%.4f %.4f %.4f 0 1.5708 %.4f</pose>\n'
+          '      <collision name="oct%s_seg%d_col">\n'
+          '        <geometry><cylinder><radius>0.03</radius><length>%.2f</length></cylinder></geometry>\n'
+          '      </collision>\n'
+          '      <visual name="oct%s_seg%d_vis">\n'
+          '        <geometry><cylinder><radius>0.03</radius><length>%.2f</length></cylinder></geometry>\n'
+          % (label, i, sx, sy, SURFACE_Z, ang + math.pi / 2, label, i, SIDE, label, i, SIDE)
+          + mat(BLUE_RING) + '      </visual>\n    </link>\n')
+    for i in range(0, 8, 2):
+        ang = math.pi / 4 * i + math.pi / 8
+        r = APOTHEM / math.cos(math.pi / 8)
+        A(sphere(f'oct{label}_float{i}',
+                 p(ox + r * math.cos(ang), oy + r * math.sin(ang), SURFACE_Z),
+                 0.12, YELLOW_FLOAT))
+    A('  </model>\n')
+
+# ---------------------------------------------------------------- vehicle
+A(f'''
+    <include>
+      <name>bluerov2</name>
+      <uri>model://bluerov2</uri>
+      <pose>{START[0]} {START[1]} 1.2 0 0 0</pose>
+    </include>
+
+  </world>
+</sdf>
+''')
+
+open(OUT, 'w').write(''.join(out))
+
+print(f'wrote {OUT}')
+print()
+print('layout:')
+print(f'  start        ({START[0]:6.2f}, {START[1]:6.2f})')
+print(f'  red flower   ({RED[0]:6.2f}, {RED[1]:6.2f})')
+print(f'  green flower ({GREEN[0]:6.2f}, {GREEN[1]:6.2f})')
+print(f'  yellow       ({YELLOW[0]:6.2f}, {YELLOW[1]:6.2f})')
+print(f'  L-bar        ({BAR[0]:6.2f}, {BAR[1]:6.2f})')
+print(f'  bins         ({BINS[0]:6.2f}, {BINS[1]:6.2f})')
+print(f'  cupid        ({CUPID[0]:6.2f}, {CUPID[1]:6.2f})')
+print(f'  octagon L    ({OCT_L[0]:6.2f}, {OCT_L[1]:6.2f})')
+print(f'  octagon R    ({OCT_R[0]:6.2f}, {OCT_R[1]:6.2f})')

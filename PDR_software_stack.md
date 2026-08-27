@@ -16,17 +16,24 @@
 
 ### Design constraint
 
-The vehicle has no absolute horizontal position reference. There is no
-DVL, no acoustic positioning, and a magnetometer is unreliable indoors
-near steel structure and the vehicle's own thrusters. Every horizontal
-decision must therefore be made from what the cameras can see at that
-instant.
+The vehicle has no absolute horizontal position reference. A DVL
+(Water Linked A50) measures velocity over the seabed, but velocity is not
+position — integrating it drifts, and a magnetometer is unreliable
+indoors near steel structure and the vehicle's own thrusters. A velocity
+scale error of just 2%, integrated over the ~20 m course, accumulates to
+a position error larger than a bin's half-width. Vision therefore remains
+the primary reference for every task.
 
-This single constraint produces the architecture's defining property:
-**the vehicle inspects rather than remembers.** It never plans a path in
-world coordinates. It centres over whatever target is beneath it, reads
-it, and acts — because "return to where the X bin was" is not a sentence
-it can act upon.
+This produces the architecture's defining property: **the vehicle
+inspects rather than remembers.** It never plans a path in world
+coordinates for a task it can see. It centres over whatever target is
+beneath it, reads it, and acts — because "return to where the X bin was"
+is not a sentence it can act upon.
+
+The one place position aiding earns its place is the short (~2 m) gaps
+between tasks where nothing is visible at all. There, DVL-fed velocity
+from ArduSub's EKF3 carries the vehicle across the gap, handing back to
+vision the instant a target or path segment reappears.
 
 ### Structure
 
@@ -43,6 +50,18 @@ The stack is approximately 4,100 lines across nine ROS 2 modules.
 | `octagon.py` | 196 | Surfacing-ring detection and containment test |
 | `depth_filter.py` | 145 | Pressure + inertial fusion for vertical state |
 | `depth_control.py` | 45 | Depth PID |
+
+### Actuation interface
+
+Every module above produces body-frame velocity and depth-setpoint
+commands, not raw thrust — the perception and mission logic are
+autopilot-agnostic. Results in this report were generated against a
+direct Gazebo interface (`bluerov2_native_bridge.py`, `thruster_mixer.py`)
+built to validate that logic at development speed. **The target autopilot
+is ArduSub, running on a Navigator flight-controller HAT, over MAVLink**;
+production thruster mixing and stabilisation belong to ArduSub.
+Integrating the mission stack against ArduSub SITL is the next milestone,
+tracked for CDR.
 
 ### Separation of axes
 
@@ -229,21 +248,29 @@ gains.
 > **[FIGURE 3]** Commanded heave versus time for the three configurations,
 > showing the chatter reduction.
 
-### Ground speed without a DVL
+### Ground speed and station-keeping
 
 Marker release requires the vehicle to be genuinely stopped — a released
 marker inherits the vehicle's horizontal velocity, and commanding zero is
 not the same as being stopped, because the hull coasts.
 
-With no DVL, the only observable ground speed comes from how fast the
-target slides across the down camera, converted to metres through the
-known altitude:
+The production source is the DVL, feeding ArduSub's EKF3 and delivered to
+the mission stack over MAVLink once ArduSub SITL integration is complete
+(see Actuation interface).
+
+The Gazebo-only development testbed — which bypasses ArduSub entirely —
+validated the same requirement against a software-only estimate: how fast
+a tracked target slides across the down camera, converted to metres
+through the known altitude:
 
 ```
 metres_per_pixel = altitude / focal_length
 ```
 
-This is down-camera visual odometry, and it gates every marker release.
+This down-camera estimate gated every marker release tested in
+simulation, and remains a useful independent cross-check once the DVL is
+integrated — it fails by a different mechanism than an acoustic Doppler
+return, so the two are not vulnerable to the same fault at once.
 
 ---
 
@@ -283,6 +310,14 @@ DIVE → LINE_FOLLOW → BUOY_APPROACH → BUOY_TOUCH → BUOY_BACKOFF
      → BIN_HOLD → BIN_DROP ⇄ BIN_HOLD → BIN_DROP → BIN_DONE
      → OCTAGON_ARRIVE → OCTAGON_HOLD → OCTAGON_ASCEND → SURFACED
 ```
+
+> Executed against an earlier reconstruction of the arena. The arena has
+> since been corrected to match the documented layout — the orange path
+> is discontinuous rather than continuous — so the fork- and
+> line-loss-based transitions above are being reworked; end-to-end
+> re-validation against the corrected arena is the immediate next test.
+> Per-task detection and control (buoy, bin, depth estimation,
+> containment) do not depend on path continuity and remain valid.
 
 Representative run:
 
@@ -344,9 +379,14 @@ Recorded explicitly, as they set the agenda for hardware trials:
 
 ## Forward work to CDR
 
-1. Implement L-bar crossing and torpedo firing.
-2. Enable multi-buoy touching (machinery present; currently set to one).
-3. Add a fault state — leak and voltage-sag detection pre-empting all
+1. Integrate the mission stack against ArduSub SITL over MAVLink, so
+   simulation matches the real actuation and stabilisation path — this is
+   also what brings live DVL-fed velocity into the mission stack.
+2. Build and validate DVL-aided transit across the blind gaps between
+   tasks, against the corrected, discontinuous-path arena.
+3. Implement L-bar crossing and torpedo firing.
+4. Enable multi-buoy touching (machinery present; currently set to one).
+5. Add a fault state — leak and voltage-sag detection pre-empting all
    states and driving the vehicle to the surface.
-4. Underwater camera calibration in the final housing.
-5. Re-derive HSV thresholds from pool imagery under vehicle lighting.
+6. Underwater camera calibration in the final housing.
+7. Re-derive HSV thresholds from pool imagery under vehicle lighting.
